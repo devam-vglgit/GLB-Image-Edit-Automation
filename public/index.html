@@ -385,6 +385,7 @@ footer span { color: var(--gold); }
   <nav class="header-nav">
     <a href="#app">Generator</a>
     <a href="#" onclick="event.preventDefault();openPromptManager()">⚙ Settings</a>
+    <a href="#" onclick="event.preventDefault();fetch('/api/logout',{method:'POST'}).then(()=>window.location.href='/login.html')">Logout</a>
     <span class="api-badge">Gemini · OpenAI</span>
   </nav>
 </header>

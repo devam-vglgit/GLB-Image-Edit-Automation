@@ -8,12 +8,57 @@ require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const Jimp = require('jimp');
 const { padToSquare } = require('./squarepad');
 const { liftMetalBlacks } = require('./metalfix');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// ── Auth (hardcoded credentials per explicit instruction — move to a real
+// user store / env vars before this app is exposed beyond internal use) ──
+const AUTH_USERNAME = 'admin';
+const AUTH_PASSWORD = 'studioe69';
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
+// A random secret per process start is fine for signing — it just means
+// everyone is logged out on restart. Set SESSION_SECRET in .env to persist
+// sessions across restarts instead.
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+function signSession(payload) {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+function verifySession(token) {
+  if (!token || !token.includes('.')) return null;
+  const [data, sig] = token.split('.');
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  const a = Buffer.from(sig || ''), b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
+    if (payload.exp && Date.now() > payload.exp) return null;
+    return payload;
+  } catch (e) { return null; }
+}
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header) return out;
+  header.split(';').forEach(pair => {
+    const idx = pair.indexOf('=');
+    if (idx > -1) out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+  });
+  return out;
+}
+function requireAuth(req, res, next) {
+  const session = verifySession(parseCookies(req).session);
+  if (session) return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Not authenticated.' });
+  return res.redirect('/login.html');
+}
 
 // ── Prompt storage ──────────────────────────────────────────
 // Each prompt's text lives in its own .md file under public/prompts/, and
@@ -156,6 +201,25 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 
 // Base64 jewellery images are large — allow a generous JSON body.
 app.use(express.json({ limit: '25mb' }));
+
+// ── Public auth routes (must come before the auth gate below) ──
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body || {};
+  if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+    const token = signSession({ user: username, exp: Date.now() + SESSION_MAX_AGE_MS });
+    res.setHeader('Set-Cookie', `session=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`);
+    return res.json({ ok: true });
+  }
+  res.status(401).json({ error: 'Invalid username or password.' });
+});
+app.post('/api/logout', (req, res) => {
+  res.setHeader('Set-Cookie', 'session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
+  res.json({ ok: true });
+});
+app.get('/login.html', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
+
+// Everything below this line requires a valid session.
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Which engines have a key configured — lets the UI disable the rest.
