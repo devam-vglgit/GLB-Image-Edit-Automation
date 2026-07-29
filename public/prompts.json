@@ -1,0 +1,25 @@
+{
+  "_readme": "Prompt manifest. Each engine has a list of approved prompts. The actual prompt text lives in the referenced .md files under public/prompts/ and is sent to the model VERBATIM. This is the live store: the app reads it on every request, and edits made from the Settings UI are written straight back to the .md file. You can also edit a .md file directly and refresh the browser to pick it up. The first prompt in each list is auto-selected when that engine is chosen. Any [YOUR RING DESIGN] token is replaced at send time by the 'Ring / subject description' box (or a sensible default if left blank).",
+  "gemini": [
+    {
+      "id": "g4",
+      "title": "CAD→CGI Product Render (white #FFFFFF)",
+      "file": "prompts/gemini-4-cad-cgi-render.md",
+      "keepScene": false
+    },
+    {
+      "id": "p969224271",
+      "title": "gfdfgdeg",
+      "file": "prompts/gemini-p969224271.md",
+      "keepScene": false
+    }
+  ],
+  "openai": [
+    {
+      "id": "o1",
+      "title": "Retouch — Preserve Exact (white bg + right shadow)",
+      "file": "prompts/openai-1-metal-enhance.md",
+      "keepScene": false
+    }
+  ]
+}
