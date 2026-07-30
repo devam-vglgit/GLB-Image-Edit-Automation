@@ -15,11 +15,15 @@ const { liftMetalBlacks } = require('./metalfix');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// Trust one reverse-proxy hop (Cloudflare / nginx in front of this server)
+// so req.secure correctly reflects the original client's protocol via
+// X-Forwarded-Proto, instead of always reading as HTTP at the origin.
+app.set('trust proxy', 1);
 
-// ── Auth (hardcoded credentials per explicit instruction — move to a real
-// user store / env vars before this app is exposed beyond internal use) ──
-const AUTH_USERNAME = 'admin';
-const AUTH_PASSWORD = 'studioe69';
+// ── Auth (single shared login — move to a real user store if per-user
+// accounts are ever needed) ──
+const AUTH_USERNAME = process.env.AUTH_USERNAME || 'admin';
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'studioe69';
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 // A random secret per process start is fine for signing — it just means
 // everyone is logged out on restart. Set SESSION_SECRET in .env to persist
@@ -53,6 +57,15 @@ function parseCookies(req) {
   });
   return out;
 }
+// Adds the Secure flag only when the request actually arrived over HTTPS
+// (directly, or via X-Forwarded-Proto from the trusted proxy hop above) —
+// so login still works over plain HTTP during local/IP-based testing, but
+// automatically hardens itself once served over HTTPS in production.
+function sessionCookie(req, value, maxAgeSeconds) {
+  const secure = req.secure ? '; Secure' : '';
+  return `session=${value}; HttpOnly; Path=/; Max-Age=${maxAgeSeconds}; SameSite=Lax${secure}`;
+}
+
 function requireAuth(req, res, next) {
   const session = verifySession(parseCookies(req).session);
   if (session) return next();
@@ -238,13 +251,13 @@ app.post('/api/login', async (req, res) => {
   if (!humanVerified) return res.status(401).json({ error: 'Bot check failed. Please retry the challenge.' });
   if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
     const token = signSession({ user: username, exp: Date.now() + SESSION_MAX_AGE_MS });
-    res.setHeader('Set-Cookie', `session=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`);
+    res.setHeader('Set-Cookie', sessionCookie(req, token, Math.floor(SESSION_MAX_AGE_MS / 1000)));
     return res.json({ ok: true });
   }
   res.status(401).json({ error: 'Invalid username or password.' });
 });
 app.post('/api/logout', (req, res) => {
-  res.setHeader('Set-Cookie', 'session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
+  res.setHeader('Set-Cookie', sessionCookie(req, '', 0));
   res.json({ ok: true });
 });
 app.get('/login.html', (req, res) => res.sendFile(path.join(__dirname, 'public', 'login.html')));
