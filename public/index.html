@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gem AI — Jewellery Image Generator</title>
+<title>Visualoom AI — Jewellery Image Generator</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
@@ -380,7 +380,7 @@ footer span { color: var(--gold); }
 <header>
   <div class="logo">
     <div class="logo-mark">✦</div>
-    GEM AI
+    VISUALOOM AI
   </div>
   <nav class="header-nav">
     <a href="#app">Generator</a>
@@ -544,7 +544,7 @@ footer span { color: var(--gold); }
 </div>
 
 <footer>
-  <p>✦ GEM AI — Jewellery Image Generator &nbsp;·&nbsp; <span>Gemini 2.5 Flash Image</span> &amp; <span>OpenAI gpt-image-1</span> &nbsp;·&nbsp; API keys secured on the server</p>
+  <p>✦ VISUALOOM AI — Jewellery Image Generator &nbsp;·&nbsp; <span>Gemini 2.5 Flash Image</span> &amp; <span>OpenAI gpt-image-1</span> &nbsp;·&nbsp; API keys secured on the server</p>
 </footer>
 
 <script>
@@ -1056,7 +1056,7 @@ function renderTokenTotal() {
 
 function safeName(name, i) {
   const base = (name || ('image-' + (i + 1))).replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 40) || ('image-' + (i + 1));
-  return 'gem-ai-' + String(i + 1).padStart(2, '0') + '-' + base + '.png';
+  return 'visualoom-ai-' + String(i + 1).padStart(2, '0') + '-' + base + '.png';
 }
 function renderResults() {
   const list = document.getElementById('results-list');
@@ -1093,7 +1093,7 @@ function downloadAll() {
   if (done.length === 1) { triggerDownload(done[0].q.result, safeName(done[0].q.name, done[0].i)); return; }
   const files = done.map(({ q, i }) => ({ name: safeName(q.name, i), bytes: dataUrlToBytes(q.result) }));
   const blob = zipStore(files);
-  triggerDownload(URL.createObjectURL(blob), 'gem-ai-batch.zip');
+  triggerDownload(URL.createObjectURL(blob), 'visualoom-ai-batch.zip');
 }
 function triggerDownload(href, name) {
   const a = document.createElement('a');
