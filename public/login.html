@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign in — GEM AI</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
@@ -47,26 +48,56 @@
       <input type="text" id="username" name="username" autocomplete="username" required autofocus>
       <label for="password">Password</label>
       <input type="password" id="password" name="password" autocomplete="current-password" required>
+      <div id="turnstileContainer" style="margin-top:16px;"></div>
       <div class="error" id="error"></div>
       <button type="submit" id="submitBtn">Sign in</button>
     </form>
   </div>
 
 <script>
+let turnstileWidgetId = null;
+let turnstileEnabled = false;
+
+// Render the Turnstile widget only if the server has real keys configured —
+// until then this silently no-ops and login works exactly as before.
+fetch('/api/turnstile-config').then(r => r.json()).then(cfg => {
+  turnstileEnabled = cfg.enabled;
+  if (!cfg.enabled || !cfg.siteKey) return;
+  const render = () => {
+    if (typeof turnstile === 'undefined') return setTimeout(render, 100);
+    turnstileWidgetId = turnstile.render('#turnstileContainer', { sitekey: cfg.siteKey });
+  };
+  render();
+});
+
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const btn = document.getElementById('submitBtn');
   const errBox = document.getElementById('error');
   errBox.style.display = 'none';
+
+  if (turnstileEnabled) {
+    const token = typeof turnstile !== 'undefined' && turnstileWidgetId !== null
+      ? turnstile.getResponse(turnstileWidgetId) : '';
+    if (!token) {
+      errBox.textContent = 'Please complete the verification challenge.';
+      errBox.style.display = 'block';
+      return;
+    }
+  }
+
   btn.disabled = true;
   btn.textContent = 'Signing in…';
   try {
+    const cfTurnstileToken = turnstileEnabled && turnstileWidgetId !== null
+      ? turnstile.getResponse(turnstileWidgetId) : '';
     const res = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username: document.getElementById('username').value,
-        password: document.getElementById('password').value
+        password: document.getElementById('password').value,
+        cfTurnstileToken
       })
     });
     const data = await res.json();
@@ -75,6 +106,7 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     } else {
       errBox.textContent = data.error || 'Sign in failed.';
       errBox.style.display = 'block';
+      if (turnstileEnabled && turnstileWidgetId !== null) turnstile.reset(turnstileWidgetId);
     }
   } catch (err) {
     errBox.textContent = 'Could not reach the server.';

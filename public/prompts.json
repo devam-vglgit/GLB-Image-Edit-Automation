@@ -6,12 +6,6 @@
       "title": "CAD→CGI Product Render (white #FFFFFF)",
       "file": "prompts/gemini-4-cad-cgi-render.md",
       "keepScene": false
-    },
-    {
-      "id": "p969224271",
-      "title": "gfdfgdeg",
-      "file": "prompts/gemini-p969224271.md",
-      "keepScene": false
     }
   ],
   "openai": [

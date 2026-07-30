@@ -60,6 +60,30 @@ function requireAuth(req, res, next) {
   return res.redirect('/login.html');
 }
 
+// ── Cloudflare Turnstile (bot-check on the login form) ──
+// Not enforced until TURNSTILE_SECRET_KEY is set in .env — until then
+// /api/login skips verification entirely, so login keeps working as-is.
+// Get both keys from the Cloudflare dashboard → Turnstile → add a widget.
+const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || '';
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+
+async function verifyTurnstile(token, remoteIp) {
+  if (!TURNSTILE_SECRET_KEY) return true; // not configured yet — allow through
+  if (!token) return false;
+  try {
+    const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ secret: TURNSTILE_SECRET_KEY, response: token, remoteip: remoteIp || '' })
+    });
+    const data = await resp.json();
+    return !!data.success;
+  } catch (e) {
+    console.error('[turnstile] verification request failed:', e.message);
+    return false;
+  }
+}
+
 // ── Prompt storage ──────────────────────────────────────────
 // Each prompt's text lives in its own .md file under public/prompts/, and
 // public/prompts.json maps id → title/file/keepScene. The .md file IS the
@@ -203,8 +227,15 @@ const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 app.use(express.json({ limit: '25mb' }));
 
 // ── Public auth routes (must come before the auth gate below) ──
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body || {};
+// Lets the login page know whether to render the Turnstile widget, and with
+// which site key. Site key is not secret — safe to expose to the browser.
+app.get('/api/turnstile-config', (req, res) => {
+  res.json({ enabled: Boolean(TURNSTILE_SECRET_KEY), siteKey: TURNSTILE_SITE_KEY });
+});
+app.post('/api/login', async (req, res) => {
+  const { username, password, cfTurnstileToken } = req.body || {};
+  const humanVerified = await verifyTurnstile(cfTurnstileToken, req.ip);
+  if (!humanVerified) return res.status(401).json({ error: 'Bot check failed. Please retry the challenge.' });
   if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
     const token = signSession({ user: username, exp: Date.now() + SESSION_MAX_AGE_MS });
     res.setHeader('Set-Cookie', `session=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_MAX_AGE_MS / 1000)}; SameSite=Lax`);
