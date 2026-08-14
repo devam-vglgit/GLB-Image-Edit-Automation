@@ -20,10 +20,24 @@ const PORT = process.env.PORT || 3000;
 // X-Forwarded-Proto, instead of always reading as HTTP at the origin.
 app.set('trust proxy', 1);
 
-// ── Auth (single shared login — move to a real user store if per-user
-// accounts are ever needed) ──
-const AUTH_USERNAME = process.env.AUTH_USERNAME || 'admin';
-const AUTH_PASSWORD = process.env.AUTH_PASSWORD || 'studioe69';
+// ── Auth (multiple fixed username/password pairs, defined in .env) ──
+// Format: AUTH_USERS="alice:pass1,bob:pass2,admin:studioe69" — add or
+// remove a "user:pass" entry and restart the server to add/remove a login.
+// If AUTH_USERS isn't set, falls back to the single legacy AUTH_USERNAME/
+// AUTH_PASSWORD pair (or admin/studioe69) so existing setups keep working.
+function loadAuthUsers() {
+  const raw = process.env.AUTH_USERS || '';
+  const users = new Map();
+  raw.split(',').map(s => s.trim()).filter(Boolean).forEach(pair => {
+    const idx = pair.indexOf(':');
+    if (idx > -1) users.set(pair.slice(0, idx), pair.slice(idx + 1));
+  });
+  if (users.size === 0) {
+    users.set(process.env.AUTH_USERNAME || 'admin', process.env.AUTH_PASSWORD || 'studioe69');
+  }
+  return users;
+}
+const AUTH_USERS = loadAuthUsers();
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 // A random secret per process start is fine for signing — it just means
 // everyone is logged out on restart. Set SESSION_SECRET in .env to persist
@@ -249,7 +263,7 @@ app.post('/api/login', async (req, res) => {
   const { username, password, cfTurnstileToken } = req.body || {};
   const humanVerified = await verifyTurnstile(cfTurnstileToken, req.ip);
   if (!humanVerified) return res.status(401).json({ error: 'Bot check failed. Please retry the challenge.' });
-  if (username === AUTH_USERNAME && password === AUTH_PASSWORD) {
+  if (AUTH_USERS.has(username) && AUTH_USERS.get(username) === password) {
     const token = signSession({ user: username, exp: Date.now() + SESSION_MAX_AGE_MS });
     res.setHeader('Set-Cookie', sessionCookie(req, token, Math.floor(SESSION_MAX_AGE_MS / 1000)));
     return res.json({ ok: true });

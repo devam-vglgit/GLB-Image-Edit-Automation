@@ -1055,8 +1055,13 @@ function renderTokenTotal() {
 }
 
 function safeName(name, i) {
-  const base = (name || ('image-' + (i + 1))).replace(/\.[^.]+$/, '').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 40) || ('image-' + (i + 1));
-  return 'visualoom-ai-' + String(i + 1).padStart(2, '0') + '-' + base + '.png';
+  // Keep the exact same filename as the uploaded input, character for
+  // character (spaces, !, (), etc. all preserved) — only strip characters
+  // that are actually illegal in a filename on disk (/ \ : * ? " < > | and
+  // control characters), never rewrite or prefix the name otherwise.
+  if (!name) return 'image-' + (i + 1) + '.png';
+  const cleaned = name.replace(/[\/\\:*?"<>|\x00-\x1F]/g, '').replace(/[. ]+$/, '');
+  return cleaned || ('image-' + (i + 1) + '.png');
 }
 function renderResults() {
   const list = document.getElementById('results-list');
