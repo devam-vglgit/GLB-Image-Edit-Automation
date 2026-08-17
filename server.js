@@ -6,6 +6,7 @@
 // ─────────────────────────────────────────────────────────────
 require('dotenv').config();
 const express = require('express');
+const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -19,6 +20,31 @@ const PORT = process.env.PORT || 3000;
 // so req.secure correctly reflects the original client's protocol via
 // X-Forwarded-Proto, instead of always reading as HTTP at the origin.
 app.set('trust proxy', 1);
+
+// ── Security headers (CSP, X-Frame-Options, X-Content-Type-Options,
+// Referrer-Policy, Permissions-Policy, HSTS, etc.) ──
+// CSP is scoped to what this app actually uses: the frontend is single
+// self-contained HTML files with inline <script>/<style> (hence
+// 'unsafe-inline' on script/style — tightening that would mean splitting
+// out every inline block into external files with nonces, a larger
+// follow-up change), Google Fonts, and the Cloudflare Turnstile widget
+// (script + the iframe it renders + the API calls it makes).
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://challenges.cloudflare.com'],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'blob:'],
+      connectSrc: ["'self'", 'https://challenges.cloudflare.com'],
+      frameSrc: ['https://challenges.cloudflare.com'],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"]
+    }
+  }
+}));
 
 // ── Auth (multiple fixed username/password pairs, defined in .env) ──
 // Format: AUTH_USERS="alice:pass1,bob:pass2,admin:studioe69" — add or
@@ -309,7 +335,11 @@ app.put('/api/prompts', (req, res) => {
     writeLibraryToFiles(lib);
     res.json({ ok: true, library: readLibraryFromFiles() });
   } catch (e) {
-    res.status(500).json({ error: 'Could not save prompts: ' + e.message });
+    // Never relay e.message here — fs errors (ENOENT/EACCES) embed full
+    // server file paths, which shouldn't reach the client. Full detail
+    // still goes to the server log for debugging.
+    console.error('[prompts:save]', e);
+    res.status(500).json({ error: 'Could not save prompts. Check the server log for details.' });
   }
 });
 
@@ -319,7 +349,8 @@ app.post('/api/prompts/reset', (req, res) => {
   try {
     res.json({ ok: true, library: readLibraryFromFiles() });
   } catch (e) {
-    res.status(500).json({ error: 'Could not reset prompts: ' + e.message });
+    console.error('[prompts:reset]', e);
+    res.status(500).json({ error: 'Could not reset prompts. Check the server log for details.' });
   }
 });
 
@@ -349,7 +380,15 @@ app.post('/api/generate', async (req, res) => {
     res.json(out);
   } catch (err) {
     console.error('[generate]', err);
-    res.status(err.status || 500).json({ error: err.message || 'Generation failed.' });
+    // err.status/.message are only trusted when the error was deliberately
+    // thrown via httpErr() with an intentional, user-safe message (e.g. "not
+    // configured", an upstream provider error). Anything else is unexpected
+    // (a bug, an fs error, etc.) and must not leak its raw message/paths.
+    if (typeof err.status === 'number') {
+      res.status(err.status).json({ error: err.message || 'Generation failed.' });
+    } else {
+      res.status(500).json({ error: 'Generation failed. Check the server log for details.' });
+    }
   }
 });
 
@@ -447,6 +486,17 @@ function splitDataUrl(dataUrl) {
   return { b64, mime };
 }
 function httpErr(status, message) { const e = new Error(message); e.status = status; return e; }
+
+// ── Catch-all error handler ──────────────────────────────
+// Anything that escapes a route's own try/catch (a malformed JSON body,
+// a synchronous throw, etc.) lands here. Full detail goes to the server
+// log only — the client always gets a generic message, never a raw
+// stack trace, file path, or internal error string.
+app.use((err, req, res, next) => {
+  console.error('[unhandled]', err);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 400).json({ error: 'Request could not be processed.' });
+});
 
 app.listen(PORT, () => {
   console.log(`AI-VGL-Studio running on http://localhost:${PORT}`);
