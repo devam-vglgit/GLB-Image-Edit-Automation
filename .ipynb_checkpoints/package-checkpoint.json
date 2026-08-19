@@ -1,0 +1,19 @@
+{
+  "name": "ai-vgl-studio",
+  "version": "1.0.0",
+  "description": "AI jewellery image generator — Express backend proxying Gemini & OpenAI image models. API keys live in server env only.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jimp": "^0.22.12"
+  },
+  "engines": {
+    "node": ">=18.13"
+  }
+}
