@@ -34,6 +34,10 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'", 'https://challenges.cloudflare.com'],
+      // The UI wires its buttons/icons with inline onclick="..." attributes.
+      // Helmet defaults this to 'none', which silently kills every click —
+      // 'unsafe-inline' on scriptSrc alone does NOT cover event-handler attrs.
+      scriptSrcAttr: ["'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:', 'blob:'],
