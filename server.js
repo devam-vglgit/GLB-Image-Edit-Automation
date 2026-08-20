@@ -50,6 +50,25 @@ app.use(helmet({
   }
 }));
 
+// Permissions-Policy — helmet does NOT set this one, so it must be added
+// explicitly (its absence was flagged in the VAPT reassessment). This app
+// only uploads image files and renders the Turnstile widget; it needs none
+// of the powerful browser features below, so all are denied outright.
+// Only features current browsers actually recognise are listed — including
+// unsupported ones (ambient-light-sensor, battery, document-domain) makes
+// Chrome log "Unrecognized feature" warnings without adding any protection.
+const PERMISSIONS_POLICY = [
+  'accelerometer=()', 'autoplay=()', 'camera=()', 'display-capture=()',
+  'encrypted-media=()', 'gamepad=()', 'geolocation=()', 'gyroscope=()',
+  'magnetometer=()', 'microphone=()', 'midi=()', 'payment=()',
+  'picture-in-picture=()', 'screen-wake-lock=()', 'serial=()', 'usb=()',
+  'xr-spatial-tracking=()'
+].join(', ');
+app.use((req, res, next) => {
+  res.setHeader('Permissions-Policy', PERMISSIONS_POLICY);
+  next();
+});
+
 // ── Auth (multiple fixed username/password pairs, defined in .env) ──
 // Format: AUTH_USERS="alice:pass1,bob:pass2,admin:studioe69" — add or
 // remove a "user:pass" entry and restart the server to add/remove a login.
