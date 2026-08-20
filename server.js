@@ -20,54 +20,41 @@ const PORT = process.env.PORT || 3000;
 // so req.secure correctly reflects the original client's protocol via
 // X-Forwarded-Proto, instead of always reading as HTTP at the origin.
 app.set('trust proxy', 1);
+// Don't advertise the framework — the full helmet() bundle used to strip this
+// for us; now that only helmet's CSP middleware is used, disable it directly.
+app.disable('x-powered-by');
 
-// ── Security headers (CSP, X-Frame-Options, X-Content-Type-Options,
-// Referrer-Policy, Permissions-Policy, HSTS, etc.) ──
-// CSP is scoped to what this app actually uses: the frontend is single
-// self-contained HTML files with inline <script>/<style> (hence
-// 'unsafe-inline' on script/style — tightening that would mean splitting
-// out every inline block into external files with nonces, a larger
-// follow-up change), Google Fonts, and the Cloudflare Turnstile widget
-// (script + the iframe it renders + the API calls it makes).
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", 'https://challenges.cloudflare.com'],
-      // The UI wires its buttons/icons with inline onclick="..." attributes.
-      // Helmet defaults this to 'none', which silently kills every click —
-      // 'unsafe-inline' on scriptSrc alone does NOT cover event-handler attrs.
-      scriptSrcAttr: ["'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
-      imgSrc: ["'self'", 'data:', 'blob:'],
-      connectSrc: ["'self'", 'https://challenges.cloudflare.com'],
-      frameSrc: ['https://challenges.cloudflare.com'],
-      objectSrc: ["'none'"],
-      baseUri: ["'self'"],
-      formAction: ["'self'"]
-    }
+// ── Content-Security-Policy (the ONLY security header set here) ──
+// Division of responsibility with the Apache reverse proxy: Apache owns the
+// static, app-agnostic headers (X-Frame-Options, X-Content-Type-Options,
+// Referrer-Policy, Permissions-Policy, HSTS). CSP stays here because it
+// encodes app-specific facts a generic proxy policy would break:
+//   • img-src data:/blob: — every generated image is a base64 data URL
+//   • script-src 'unsafe-inline' — frontend is single-file HTML with inline <script>
+//   • script-src-attr 'unsafe-inline' — buttons/icons use inline onclick="..."
+//     (helmet defaults this to 'none', which silently kills every click)
+//   • challenges.cloudflare.com — the Turnstile widget, i.e. login
+//   • fonts.googleapis.com / fonts.gstatic.com — Google Fonts
+// Only helmet's CSP middleware is used (not the full helmet() bundle) so this
+// app emits exactly one header and can never duplicate one Apache sends.
+// A duplicated CSP is especially dangerous: browsers enforce the INTERSECTION
+// of all CSP headers, so two individually-valid policies can combine into one
+// that breaks the app.
+app.use(helmet.contentSecurityPolicy({
+  directives: {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'", "'unsafe-inline'", 'https://challenges.cloudflare.com'],
+    scriptSrcAttr: ["'unsafe-inline'"],
+    styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+    imgSrc: ["'self'", 'data:', 'blob:'],
+    connectSrc: ["'self'", 'https://challenges.cloudflare.com'],
+    frameSrc: ['https://challenges.cloudflare.com'],
+    objectSrc: ["'none'"],
+    baseUri: ["'self'"],
+    formAction: ["'self'"]
   }
 }));
-
-// Permissions-Policy — helmet does NOT set this one, so it must be added
-// explicitly (its absence was flagged in the VAPT reassessment). This app
-// only uploads image files and renders the Turnstile widget; it needs none
-// of the powerful browser features below, so all are denied outright.
-// Only features current browsers actually recognise are listed — including
-// unsupported ones (ambient-light-sensor, battery, document-domain) makes
-// Chrome log "Unrecognized feature" warnings without adding any protection.
-const PERMISSIONS_POLICY = [
-  'accelerometer=()', 'autoplay=()', 'camera=()', 'display-capture=()',
-  'encrypted-media=()', 'gamepad=()', 'geolocation=()', 'gyroscope=()',
-  'magnetometer=()', 'microphone=()', 'midi=()', 'payment=()',
-  'picture-in-picture=()', 'screen-wake-lock=()', 'serial=()', 'usb=()',
-  'xr-spatial-tracking=()'
-].join(', ');
-app.use((req, res, next) => {
-  res.setHeader('Permissions-Policy', PERMISSIONS_POLICY);
-  next();
-});
 
 // ── Auth (multiple fixed username/password pairs, defined in .env) ──
 // Format: AUTH_USERS="alice:pass1,bob:pass2,admin:studioe69" — add or
