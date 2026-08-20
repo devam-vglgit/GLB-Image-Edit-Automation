@@ -3,8 +3,26 @@
   "gemini": [
     {
       "id": "g4",
-      "title": "CAD→CGI Product Render (white #FFFFFF)",
+      "title": "Main View",
       "file": "prompts/gemini-4-cad-cgi-render.md",
+      "keepScene": false
+    },
+    {
+      "id": "p794811801",
+      "title": "Test",
+      "file": "prompts/gemini-p794811801.md",
+      "keepScene": false
+    },
+    {
+      "id": "p1284419663",
+      "title": "Final All Images",
+      "file": "prompts/gemini-p1284419663.md",
+      "keepScene": false
+    },
+    {
+      "id": "p1664647209",
+      "title": "LSP TESTING",
+      "file": "prompts/gemini-p1664647209.md",
       "keepScene": false
     }
   ],

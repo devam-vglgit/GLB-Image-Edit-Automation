@@ -1,0 +1,333 @@
+// ─────────────────────────────────────────────────────────────
+// AI-VGL-Studio backend
+// Holds provider API keys in server env ONLY and proxies image
+// generation requests to Google Gemini and OpenAI.
+// The browser never sees or sends an API key.
+// ─────────────────────────────────────────────────────────────
+require('dotenv').config();
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const Jimp = require('jimp');
+const { padToSquare } = require('./squarepad');
+const { liftMetalBlacks } = require('./metalfix');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ── Prompt storage ──────────────────────────────────────────
+// Each prompt's text lives in its own .md file under public/prompts/, and
+// public/prompts.json maps id → title/file/keepScene. The .md file IS the
+// live store: the app reads straight from it every time /api/prompts is
+// requested, and any edit made from the UI is written straight back to it.
+// New prompts created from the UI get a fresh .md file auto-created here.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const PROMPTS_DIR = path.join(PUBLIC_DIR, 'prompts');
+const MANIFEST_FILE = path.join(PUBLIC_DIR, 'prompts.json');
+
+function loadManifest() {
+  try { return JSON.parse(fs.readFileSync(MANIFEST_FILE, 'utf8')); }
+  catch (e) { console.warn('No/invalid prompts.json manifest:', e.message); return { gemini: [], openai: [] }; }
+}
+function saveManifest(manifest) {
+  fs.writeFileSync(MANIFEST_FILE, JSON.stringify(manifest, null, 2), 'utf8');
+}
+
+// Read the current library straight from the .md files on disk.
+function readLibraryFromFiles() {
+  const manifest = loadManifest();
+  const hydrate = list => (list || []).map(item => {
+    let text = '';
+    try { text = fs.readFileSync(path.join(PUBLIC_DIR, item.file), 'utf8').trim(); }
+    catch (e) { console.warn('Cannot read prompt file', item.file, e.message); }
+    return { id: item.id, title: item.title, text, keepScene: !!item.keepScene };
+  });
+  return { gemini: hydrate(manifest.gemini), openai: hydrate(manifest.openai) };
+}
+
+// Write an edited library back out: each prompt's text is saved to its .md
+// file, and title/keepScene changes update prompts.json. A prompt with no
+// existing manifest entry (newly added from the UI) gets a new .md file.
+// Any prompt that was REMOVED from the list (deleted in the UI) has its
+// .md file deleted too, so disk never keeps orphaned prompt files around.
+function writeLibraryToFiles(lib) {
+  const manifest = loadManifest();
+  fs.mkdirSync(PROMPTS_DIR, { recursive: true });
+  for (const engine of ['gemini', 'openai']) {
+    const existingById = new Map((manifest[engine] || []).map(e => [e.id, e]));
+    const keptIds = new Set((lib[engine] || []).map(p => p.id));
+
+    for (const [id, entry] of existingById) {
+      if (!keptIds.has(id)) {
+        try { fs.unlinkSync(path.join(PUBLIC_DIR, entry.file)); }
+        catch (e) { console.warn('Could not delete prompt file', entry.file, e.message); }
+      }
+    }
+
+    manifest[engine] = (lib[engine] || []).map(p => {
+      let entry = existingById.get(p.id);
+      if (!entry) {
+        const safeName = String(p.id).replace(/[^a-z0-9_-]/gi, '') || ('p' + Math.random().toString(36).slice(2, 9));
+        entry = { id: p.id, title: p.title, file: `prompts/${engine}-${safeName}.md` };
+      }
+      entry.title = p.title;
+      entry.keepScene = !!p.keepScene;
+      fs.writeFileSync(path.join(PUBLIC_DIR, entry.file), p.text + '\n', 'utf8');
+      return entry;
+    });
+  }
+  saveManifest(manifest);
+}
+// Basic shape validation for an incoming library payload.
+// ── Rate-limit-aware fetch ──
+// Retries with exponential backoff on 429 (rate limit) and 503 (transient
+// overload). Honours the API's Retry-After header when present. This is what
+// lets a large batch survive hitting a per-minute quota instead of failing
+// that image outright.
+const RETRY_MAX = Number(process.env.GEMINI_RETRY_MAX) || 4;
+const RETRY_BASE_MS = Number(process.env.GEMINI_RETRY_BASE_MS) || 2000;
+async function fetchWithRetry(url, opts) {
+  for (let attempt = 0; ; attempt++) {
+    const resp = await fetch(url, opts);
+    if (resp.ok || (resp.status !== 429 && resp.status !== 503) || attempt >= RETRY_MAX) return resp;
+    const retryAfterHeader = Number(resp.headers.get('retry-after'));
+    const wait = retryAfterHeader > 0 ? retryAfterHeader * 1000 : RETRY_BASE_MS * Math.pow(2, attempt);
+    console.warn(`[rate-limit] status ${resp.status}, retry ${attempt + 1}/${RETRY_MAX} in ${wait}ms`);
+    await new Promise(r => setTimeout(r, wait));
+  }
+}
+
+function sanitizeLibrary(body) {
+  const clean = eng => Array.isArray(body?.[eng])
+    ? body[eng]
+        .map(p => ({ id: String(p.id || ('p' + Math.random().toString(36).slice(2, 9))), title: String(p.title || '').slice(0, 200), text: String(p.text || '').slice(0, 40000), keepScene: !!p.keepScene }))
+        .filter(p => p.title || p.text)
+    : [];
+  return { gemini: clean('gemini'), openai: clean('openai') };
+}
+
+
+// Model ids (override via env if the providers rename them)
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-image';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-image-1';
+
+// Output resolution for Gemini image models: "1K", "2K" or "4K" (Pro supports up to 4K).
+// 2K gives sharp, zoom-friendly detail at a reasonable file size.
+const GEMINI_IMAGE_SIZE = process.env.GEMINI_IMAGE_SIZE || '2K';
+// Output aspect ratio for Gemini images (square by default, per team spec).
+const GEMINI_ASPECT = process.env.GEMINI_ASPECT || '1:1';
+const GEMINI_SIZE_OPTIONS = [
+  { id: '1K', label: '1K', hint: 'Fastest & smallest files' },
+  { id: '2K', label: '2K', hint: 'Sharp, zoom-friendly (recommended)' },
+  { id: '4K', label: '4K', hint: 'Maximum detail — large files, pricier' }
+];
+const GEMINI_SIZE_IDS = GEMINI_SIZE_OPTIONS.map(s => s.id);
+
+// Temperature: how much the model creatively reinterprets vs. sticks literally
+// to the source image + prompt. Lower = more faithful (less re-posing/rotation/
+// invented detail); higher = more variation. Default '' means "don't send it" —
+// leaves the model's own default behaviour completely unchanged unless picked.
+const GEMINI_TEMPERATURE_OPTIONS = [
+  { id: '', label: 'Model default', hint: 'No override — current behaviour' },
+  { id: '0.2', label: 'Low (0.2)', hint: 'Most faithful — least creative drift' },
+  { id: '0.5', label: 'Medium (0.5)', hint: 'Balanced' },
+  { id: '0.9', label: 'High (0.9)', hint: 'More creative — more variation' }
+];
+const GEMINI_TEMPERATURE_IDS = GEMINI_TEMPERATURE_OPTIONS.map(t => t.id);
+
+// Gemini image models the user can pick from in the UI dropdown.
+// Each: id (API model id) + label (friendly name) + hint (when to use).
+// cost = approx per-image API price (standard, non-batch). Verify at
+// https://ai.google.dev/gemini-api/docs/pricing — prices change.
+const GEMINI_MODEL_OPTIONS = [
+  { id: 'gemini-3-pro-image',        label: 'Nano Banana Pro',      cost: '≈$0.134/img (2K) · $0.24 (4K)', hint: 'Highest quality — best for hero shots (slower, pricier)' },
+  { id: 'gemini-3.1-flash-image',    label: 'Nano Banana 2',        cost: '≈$0.067/img (1K)',              hint: 'Newer flash — strong quality, faster' },
+  { id: 'gemini-2.5-flash-image',    label: 'Nano Banana',          cost: '≈$0.039/img · retires Oct 2026', hint: 'Fast & economical — great for large batches' },
+  { id: 'gemini-3.1-flash-lite-image', label: 'Nano Banana 2 Lite', cost: '≈$0.034/img (1K)',              hint: 'Fastest & cheapest — quick drafts' }
+];
+// Ensure the env-configured default is always a selectable option.
+if (!GEMINI_MODEL_OPTIONS.some(m => m.id === GEMINI_MODEL)) {
+  GEMINI_MODEL_OPTIONS.unshift({ id: GEMINI_MODEL, label: GEMINI_MODEL, hint: 'From server config' });
+}
+const GEMINI_MODEL_IDS = GEMINI_MODEL_OPTIONS.map(m => m.id);
+
+const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
+const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+
+// Base64 jewellery images are large — allow a generous JSON body.
+app.use(express.json({ limit: '25mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Which engines have a key configured — lets the UI disable the rest.
+app.get('/api/config', (req, res) => {
+  res.json({
+    engines: {
+      gemini: Boolean(GEMINI_KEY),
+      openai: Boolean(OPENAI_KEY)
+    },
+    models: { gemini: GEMINI_MODEL, openai: OPENAI_MODEL },
+    geminiModels: GEMINI_MODEL_OPTIONS,      // selectable options for the dropdown
+    geminiModelDefault: GEMINI_MODEL,        // the env default (pre-selected)
+    geminiSizes: GEMINI_SIZE_OPTIONS,        // selectable output resolutions
+    geminiSizeDefault: GEMINI_IMAGE_SIZE,
+    geminiTemperatures: GEMINI_TEMPERATURE_OPTIONS,  // selectable temperature presets
+    geminiTemperatureDefault: ''                     // '' = no override, model's own default
+  });
+});
+
+// Return the current editable prompt library, read straight from the .md files.
+app.get('/api/prompts', (req, res) => {
+  res.json(readLibraryFromFiles());
+});
+
+// Save the edited prompt library — writes each prompt's text back to its .md file.
+app.put('/api/prompts', (req, res) => {
+  try {
+    const lib = sanitizeLibrary(req.body);
+    writeLibraryToFiles(lib);
+    res.json({ ok: true, library: readLibraryFromFiles() });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not save prompts: ' + e.message });
+  }
+});
+
+// The .md files are the live store now, so "reset" just re-reads them —
+// kept for UI compatibility (the Settings modal calls this after a save).
+app.post('/api/prompts/reset', (req, res) => {
+  try {
+    res.json({ ok: true, library: readLibraryFromFiles() });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reset prompts: ' + e.message });
+  }
+});
+
+app.post('/api/generate', async (req, res) => {
+  try {
+    const { engine, image, prompt, ratio, model, imageSize, temperature, keepScene } = req.body || {};
+    if (!image || !prompt) return res.status(400).json({ error: 'image and prompt are required.' });
+    if (!engine || !['gemini', 'openai'].includes(engine)) return res.status(400).json({ error: 'engine must be "gemini" or "openai".' });
+
+    // For Gemini, honour requested model/resolution/temperature only if in the allow-lists; else fall back to env defaults.
+    const geminiModel = (model && GEMINI_MODEL_IDS.includes(model)) ? model : GEMINI_MODEL;
+    const geminiSize = (imageSize && GEMINI_SIZE_IDS.includes(imageSize)) ? imageSize : GEMINI_IMAGE_SIZE;
+    const geminiTemperature = GEMINI_TEMPERATURE_IDS.includes(temperature) ? temperature : '';
+
+    const out = engine === 'gemini'
+      ? await generateGemini(image, prompt, geminiModel, geminiSize, geminiTemperature)
+      : await generateOpenAI(image, prompt, ratio);
+
+    // On-model / worn shots (keepScene) keep their real scene, so the white-background
+    // post-processing (metal black-lift) must be SKIPPED — those assume a
+    // product-on-pure-white image and would damage a scene photo.
+    // Square crop is disabled: output keeps the same aspect ratio as the input.
+    if (!keepScene && out && out.image) {
+      out.image = await liftMetalBlacks(out.image);   // lift near-black metal reflections
+    }
+
+    res.json(out);
+  } catch (err) {
+    console.error('[generate]', err);
+    res.status(err.status || 500).json({ error: err.message || 'Generation failed.' });
+  }
+});
+
+// ── Gemini image generation ──
+async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
+  if (!GEMINI_KEY) throw httpErr(503, 'Gemini is not configured on the server (missing GEMINI_API_KEY).');
+  const modelId = model || GEMINI_MODEL;
+  const imageSize = size || GEMINI_IMAGE_SIZE;
+  const { b64, mime } = splitDataUrl(imageDataUrl);
+  const generationConfig = { imageConfig: { imageSize } };   // aspect handled by backend square-pad
+  if (temperature !== '' && temperature != null) generationConfig.temperature = Number(temperature);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`;
+  const resp = await fetchWithRetry(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [{ inline_data: { mime_type: mime, data: b64 } }, { text: prompt }] }],
+      generationConfig
+    })
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    const msg = resp.status === 429
+      ? 'Gemini rate limit reached — retried automatically but still limited. Try again shortly, or slow down the batch.'
+      : (e.error?.message || `Gemini API error ${resp.status}`);
+    throw httpErr(resp.status, msg);
+  }
+  const data = await resp.json();
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  let imagePart = null, textPart = '';
+  for (const part of parts) {
+    const inl = part.inlineData || part.inline_data;
+    if (inl && inl.data) imagePart = inl;
+    else if (part.text) textPart += part.text;
+  }
+  if (!imagePart) throw httpErr(502, textPart || 'Gemini returned no image.');
+  const outMime = imagePart.mimeType || imagePart.mime_type || 'image/png';
+  const u = data.usageMetadata || {};
+  const usage = {
+    promptTokens: u.promptTokenCount || 0,
+    outputTokens: u.candidatesTokenCount || 0,
+    totalTokens: u.totalTokenCount || ((u.promptTokenCount || 0) + (u.candidatesTokenCount || 0))
+  };
+  return { image: `data:${outMime};base64,${imagePart.data}`, note: textPart, usage, model: modelId };
+}
+
+// ── OpenAI gpt-image-1 edits ──
+async function generateOpenAI(imageDataUrl, prompt, ratio) {
+  if (!OPENAI_KEY) throw httpErr(503, 'OpenAI is not configured on the server (missing OPENAI_API_KEY).');
+  const { b64 } = splitDataUrl(imageDataUrl);
+  const buf = Buffer.from(b64, 'base64');
+  // Re-encode to a proper RGBA PNG. OpenAI's edit endpoint rejects mismatched
+  // formats/modes ("Invalid image file or mode"), e.g. a JPEG sent as .png, so
+  // we normalise the input to a valid PNG before uploading.
+  let pngBuf = buf;
+  try { pngBuf = await (await Jimp.read(buf)).getBufferAsync(Jimp.MIME_PNG); }
+  catch (e) { console.warn('[openai] PNG re-encode failed, sending raw:', e.message); }
+  const fd = new FormData();
+  fd.append('model', OPENAI_MODEL);
+  fd.append('image', new Blob([pngBuf], { type: 'image/png' }), 'input.png');
+  fd.append('prompt', prompt);
+  const sizeMap = { '1:1': '1024x1024', '4:5': '1024x1536', '16:9': '1536x1024' };
+  if (sizeMap[ratio]) fd.append('size', sizeMap[ratio]);
+
+  const resp = await fetchWithRetry('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_KEY}` },
+    body: fd
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({}));
+    const msg = resp.status === 429
+      ? 'OpenAI rate limit reached — retried automatically but still limited. Try again shortly, or slow down the batch.'
+      : (e.error?.message || `OpenAI API error ${resp.status}`);
+    throw httpErr(resp.status, msg);
+  }
+  const data = await resp.json();
+  const b64out = data.data?.[0]?.b64_json;
+  if (!b64out) throw httpErr(502, 'OpenAI returned no image.');
+  const u = data.usage || {};
+  const usage = {
+    promptTokens: u.input_tokens || 0,
+    outputTokens: u.output_tokens || 0,
+    totalTokens: u.total_tokens || ((u.input_tokens || 0) + (u.output_tokens || 0))
+  };
+  return { image: `data:image/png;base64,${b64out}`, note: '', usage, model: OPENAI_MODEL };
+}
+
+// ── helpers ──
+function splitDataUrl(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  const header = dataUrl.slice(0, comma);
+  const b64 = dataUrl.slice(comma + 1);
+  const mime = (header.match(/data:(.*?);/) || [])[1] || 'image/png';
+  return { b64, mime };
+}
+function httpErr(status, message) { const e = new Error(message); e.status = status; return e; }
+
+app.listen(PORT, () => {
+  console.log(`AI-VGL-Studio running on http://localhost:${PORT}`);
+  console.log(`  Gemini: ${GEMINI_KEY ? 'configured' : 'MISSING key'} (${GEMINI_MODEL})`);
+  console.log(`  OpenAI: ${OPENAI_KEY ? 'configured' : 'MISSING key'} (${OPENAI_MODEL})`);
+});
