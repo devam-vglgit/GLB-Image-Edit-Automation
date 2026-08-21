@@ -24,6 +24,12 @@
       "title": "LSP TESTING",
       "file": "prompts/gemini-p1664647209.md",
       "keepScene": false
+    },
+    {
+      "id": "p1680430958",
+      "title": "LSP White Background editing",
+      "file": "prompts/gemini-p1680430958.md",
+      "keepScene": false
     }
   ],
   "openai": [
