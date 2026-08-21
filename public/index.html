@@ -469,7 +469,14 @@ footer span { color: var(--gold); }
           <h3>Apply a Team Prompt</h3>
         </div>
         <div class="config-body">
-          <div>
+          <!-- Choose between an approved team prompt and a throwaway one-off
+               prompt typed by hand for this run only. -->
+          <div class="engine-toggle" id="prompt-mode-toggle" style="align-self:flex-start;">
+            <button class="engine-opt active" data-mode="team" onclick="setPromptMode('team')">📋 Team Prompt</button>
+            <button class="engine-opt" data-mode="custom" onclick="setPromptMode('custom')">✍ My Own Prompt</button>
+          </div>
+
+          <div id="team-prompt-wrap">
             <div class="section-title">
               <span id="library-title">Approved Prompts</span>
               <button class="manage-link" onclick="openPromptManager()">✎ Manage prompts</button>
@@ -569,6 +576,7 @@ const S = {
   queue: [],            // [{ id, name, data(dataURL), status, result, note, error }]
   library: { gemini: [], openai: [] },   // per-engine list of strict prompts (from files)
   selectedPromptId: null,
+  promptMode: 'team',   // 'team' = use an approved prompt | 'custom' = one-off hand-typed prompt
   ratio: 'auto',
   busy: false
 };
@@ -580,6 +588,13 @@ function findPrompt(id) {
     if (hit) return hit;
   }
   return null;
+}
+// keepScene comes from the selected prompt's flag. A one-off custom prompt has
+// no flag, so it defaults to false — i.e. treated like a product shot, same as
+// the standard prompts.
+function currentKeepScene() {
+  if (S.promptMode === 'custom') return false;
+  return !!findPrompt(S.selectedPromptId)?.keepScene;
 }
 
 // Load the prompt library from the backend (persisted server-side, seeded from
@@ -629,7 +644,9 @@ async function loadServerConfig() {
   populateModelPicker();
   populateSizePicker();
   populateTemperaturePicker();
-  document.querySelectorAll('.engine-opt').forEach(o => {
+  // Scoped to #engine-toggle: the prompt-mode toggle reuses .engine-opt purely
+  // for styling and has no data-engine, so an unscoped selector would disable it.
+  document.querySelectorAll('#engine-toggle .engine-opt').forEach(o => {
     const eng = o.dataset.engine;
     const ok = ENGINE_AVAILABLE[eng];
     o.disabled = !ok;
@@ -648,7 +665,7 @@ function selectEngine(engine) {
   if (!ENGINE_AVAILABLE[engine]) return;
   S.engine = engine;
   localStorage.setItem('gem_engine', engine);
-  document.querySelectorAll('.engine-opt').forEach(o => o.classList.toggle('active', o.dataset.engine === engine));
+  document.querySelectorAll('#engine-toggle .engine-opt').forEach(o => o.classList.toggle('active', o.dataset.engine === engine));
   const label = engine === 'gemini' ? 'Gemini' : 'ChatGPT';
   document.getElementById('model-picker').style.display = (engine === 'gemini' && GEMINI_MODELS.length) ? '' : 'none';
   document.getElementById('size-picker').style.display = (engine === 'gemini' && GEMINI_SIZES.length) ? '' : 'none';
@@ -757,18 +774,42 @@ function renderPromptList() {
   });
 }
 
-// The description box always shows. If the selected prompt contains [YOUR RING
-// DESIGN], it fills that token (Gemini's on-model prompt). Otherwise (e.g. the
-// ChatGPT prompt) it's just an extra suggestion appended after the master
-// prompt — the master prompt text itself is never changed, only added to.
+// Switch between using an approved team prompt and typing a one-off prompt.
+// A custom prompt is never saved — it applies to this run only, so the
+// approved library is left completely untouched.
+function setPromptMode(mode) {
+  S.promptMode = (mode === 'custom') ? 'custom' : 'team';
+  document.querySelectorAll('#prompt-mode-toggle .engine-opt').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === S.promptMode);
+  });
+  document.getElementById('team-prompt-wrap').style.display = (S.promptMode === 'custom') ? 'none' : '';
+  updateRingBox();
+}
+
+// The description box always shows, and what it means depends on the mode:
+//   • custom mode  — it IS the whole prompt, used verbatim for this run only
+//   • team + [YOUR RING DESIGN] — it fills that token
+//   • team, no token — it's an extra suggestion appended after the master
+//     prompt, whose text is never changed, only added to
 function updateRingBox() {
+  const label = document.getElementById('desc-label');
+  const notes = document.getElementById('notes');
+  const hint = document.getElementById('desc-hint');
+
+  if (S.promptMode === 'custom') {
+    label.textContent = 'Your prompt (this run only)';
+    notes.placeholder = 'Type the full prompt to send to the model for this run — e.g. "Place this ring on a white marble surface with soft daylight from the left." No team prompt is used, and nothing here is saved.';
+    hint.textContent = 'Sent to the model exactly as written. Not saved to the prompt library — this run only.';
+    return;
+  }
+
   const p = findPrompt(S.selectedPromptId);
   const usesToken = !!(p && p.text && p.text.includes(RING_TOKEN));
-  document.getElementById('desc-label').textContent = usesToken ? 'Ring / subject description' : 'Description (optional)';
-  document.getElementById('notes').placeholder = usesToken
+  label.textContent = usesToken ? 'Ring / subject description' : 'Description (optional)';
+  notes.placeholder = usesToken
     ? 'Describe the piece to insert where the prompt says [YOUR RING DESIGN] — e.g. a solitaire diamond ring in yellow gold. Leave blank to use the uploaded image as reference.'
     : 'Any extra suggestion or detail for this generation — e.g. "warm gold tone" or "add a slight left-side glare". Appended after the prompt, the master prompt itself stays unchanged.';
-  document.getElementById('desc-hint').textContent = usesToken
+  hint.textContent = usesToken
     ? 'Fills the [YOUR RING DESIGN] placeholder in the prompt.'
     : 'Treated as an extra suggestion — the master prompt text stays exactly as written.';
 }
@@ -926,10 +967,14 @@ function updateGenerateLabel() {
 //   • Otherwise it's appended as an EXTRA SUGGESTION after the master prompt
 //     (the master text stays exactly as written).
 function buildFinalPrompt() {
+  const desc0 = document.getElementById('notes').value.trim();
+  // Custom mode: the box IS the prompt, sent verbatim, nothing prepended.
+  if (S.promptMode === 'custom') return desc0 || null;
+
   const p = findPrompt(S.selectedPromptId);
   if (!p || !p.text) return null;
   let text = p.text.trim();
-  const desc = document.getElementById('notes').value.trim();
+  const desc = desc0;
 
   if (text.includes(RING_TOKEN)) {
     const fill = desc || 'the ring shown in the uploaded reference image';
@@ -944,9 +989,14 @@ function buildFinalPrompt() {
 async function runBatch() {
   if (S.busy) return;
   if (!S.queue.length) { alert('Please upload at least one image.'); return; }
-  if (!S.selectedPromptId) { alert('Please select a prompt first.'); return; }
+  if (S.promptMode === 'team' && !S.selectedPromptId) { alert('Please select a prompt first.'); return; }
   const prompt = buildFinalPrompt();
-  if (!prompt) { alert('The selected prompt is empty. Check its .md file in public/prompts/, or pick another prompt.'); return; }
+  if (!prompt) {
+    alert(S.promptMode === 'custom'
+      ? 'Please type your prompt in the box above.'
+      : 'The selected prompt is empty. Check its .md file in public/prompts/, or pick another prompt.');
+    return;
+  }
 
   S.busy = true;
   clearError();
@@ -978,7 +1028,7 @@ async function runBatch() {
       setItemStatus(q.id, 'processing');
       btn.innerHTML = '<div class="btn-spinner"></div> Generating ' + (done + failed + 1) + ' / ' + total + '…';
       try {
-        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, S.geminiModel, S.geminiSize, S.geminiTemperature, !!findPrompt(S.selectedPromptId)?.keepScene);
+        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, S.geminiModel, S.geminiSize, S.geminiTemperature, currentKeepScene());
         q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done'; done++;
       } catch (err) {
         q.error = err.message || String(err); q.status = 'error'; failed++;
@@ -1004,13 +1054,18 @@ async function regenerateOne(id) {
   const q = S.queue.find(x => x.id === id);
   if (!q || q.status === 'processing') return;
   const prompt = buildFinalPrompt();
-  if (!prompt) { alert('The selected prompt is empty. Check its .md file in public/prompts/, or pick another prompt.'); return; }
+  if (!prompt) {
+    alert(S.promptMode === 'custom'
+      ? 'Please type your prompt in the box above.'
+      : 'The selected prompt is empty. Check its .md file in public/prompts/, or pick another prompt.');
+    return;
+  }
 
   q.status = 'processing'; q.error = '';
   renderQueue();
   renderResults();
   try {
-    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, S.geminiModel, S.geminiSize, S.geminiTemperature, !!findPrompt(S.selectedPromptId)?.keepScene);
+    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, S.geminiModel, S.geminiSize, S.geminiTemperature, currentKeepScene());
     q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done';
   } catch (err) {
     q.error = err.message || String(err); q.status = 'error';
