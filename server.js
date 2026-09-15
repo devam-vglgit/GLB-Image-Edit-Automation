@@ -283,14 +283,17 @@ if (!GEMINI_MODEL_OPTIONS.some(m => m.id === GEMINI_MODEL)) {
 }
 const GEMINI_MODEL_IDS = GEMINI_MODEL_OPTIONS.map(m => m.id);
 
-// OpenAI image models the user can pick from in the UI dropdown. gpt-image-1
-// and gpt-image-1-mini are being phased out in favour of gpt-image-2 (exact
+// OpenAI image models the user can pick from in the UI dropdown. All four
+// are confirmed to support the images/edits endpoint (image input + editing,
+// which this app always uses) per OpenAI's API reference. gpt-image-1 and
+// gpt-image-1-mini are being phased out in favour of the 2.5 models (exact
 // shutdown date unconfirmed as of writing — check platform.openai.com/docs
 // /deprecations before removing the older ones outright).
 const OPENAI_MODEL_OPTIONS = [
   { id: 'gpt-image-1', label: 'GPT Image 1', hint: 'Current default — being deprecated, migrate when convenient' },
   { id: 'gpt-image-1-mini', label: 'GPT Image 1 Mini', hint: 'Cheaper/faster — also being deprecated' },
-  { id: 'gpt-image-2', label: 'GPT Image 2', hint: 'Recommended replacement — verify access on your OpenAI account first' }
+  { id: 'gpt-image-2.5-sunburst', label: 'GPT Image 2.5 Sunburst', hint: 'Most capable — generation and editing' },
+  { id: 'gpt-image-2.5-flare', label: 'GPT Image 2.5 Flare', hint: 'Fast, high-quality everyday generation' }
 ];
 if (!OPENAI_MODEL_OPTIONS.some(m => m.id === OPENAI_MODEL)) {
   OPENAI_MODEL_OPTIONS.unshift({ id: OPENAI_MODEL, label: OPENAI_MODEL, hint: 'From server config' });
