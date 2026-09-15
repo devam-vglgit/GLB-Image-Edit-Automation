@@ -649,8 +649,13 @@ async function loadServerConfig() {
     if (!GEMINI_TEMPERATURES.some(t => t.id === S.geminiTemperature)) {
       S.geminiTemperature = cfg.geminiTemperatureDefault ?? '';
     }
+    // OpenAI model is NEVER auto-defaulted — only what the user picked last
+    // (via localStorage) carries over. If that stored choice is no longer a
+    // valid option (removed from the server list, or never chosen before),
+    // it's left blank and the picker shows a "Select a model" placeholder;
+    // the user must explicitly choose before generating.
     if (!OPENAI_MODELS.some(m => m.id === S.openaiModel)) {
-      S.openaiModel = cfg.openaiModelDefault || MODELS.openai || (OPENAI_MODELS[0] && OPENAI_MODELS[0].id) || '';
+      S.openaiModel = '';
     }
   } catch (e) {
     console.warn('Could not load /api/config:', e.message);
@@ -737,14 +742,21 @@ function populateOpenaiModelPicker() {
   const sel = document.getElementById('openai-model');
   if (!sel) return;
   sel.innerHTML = '';
+  // No option is ever pre-selected — a placeholder makes that explicit rather
+  // than silently landing on whichever model happens to be first in the list.
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Select a model…';
+  placeholder.disabled = true;
+  sel.appendChild(placeholder);
   OPENAI_MODELS.forEach(m => {
     const o = document.createElement('option');
     o.value = m.id;
-    o.textContent = m.label + ' (' + m.id + ')' + (m.id === MODELS.openai ? '  (default)' : '');
+    o.textContent = m.label + ' (' + m.id + ')';
     o.title = m.hint || '';
     sel.appendChild(o);
   });
-  if (S.openaiModel) sel.value = S.openaiModel;
+  sel.value = S.openaiModel || '';
 }
 
 function onOpenaiModelChange() {
@@ -1032,6 +1044,7 @@ function buildFinalPrompt() {
 async function runBatch() {
   if (S.busy) return;
   if (!S.queue.length) { alert('Please upload at least one image.'); return; }
+  if (S.engine === 'openai' && !S.openaiModel) { alert('Please select a model first.'); return; }
   if (S.promptMode === 'team' && !S.selectedPromptId) { alert('Please select a prompt first.'); return; }
   const prompt = buildFinalPrompt();
   if (!prompt) {
@@ -1096,6 +1109,7 @@ async function runBatch() {
 async function regenerateOne(id) {
   const q = S.queue.find(x => x.id === id);
   if (!q || q.status === 'processing') return;
+  if (S.engine === 'openai' && !S.openaiModel) { alert('Please select a model first.'); return; }
   const prompt = buildFinalPrompt();
   if (!prompt) {
     alert(S.promptMode === 'custom'
