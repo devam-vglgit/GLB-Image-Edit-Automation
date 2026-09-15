@@ -432,6 +432,10 @@ footer span { color: var(--gold); }
       <label for="gemini-temperature">Fidelity</label>
       <select id="gemini-temperature" onchange="onTemperatureChange()"></select>
     </div>
+    <div class="model-picker" id="openai-model-picker" style="display:none;">
+      <label for="openai-model">Model</label>
+      <select id="openai-model" onchange="onOpenaiModelChange()"></select>
+    </div>
     <span id="engine-note" style="font-size:12px;color:var(--ink-faint);"></span>
   </div>
 
@@ -563,6 +567,7 @@ let ENGINE_AVAILABLE = { gemini: true, openai: true };
 let GEMINI_MODELS = [];             // [{id,label,hint}] selectable options from the server
 let GEMINI_SIZES = [];              // [{id,label,hint}] selectable output resolutions
 let GEMINI_TEMPERATURES = [];       // [{id,label,hint}] selectable temperature presets ('' = model default)
+let OPENAI_MODELS = [];             // [{id,label,hint}] selectable OpenAI models from the server
 
 const RING_TOKEN = '[YOUR RING DESIGN]';
 
@@ -573,6 +578,7 @@ const S = {
   geminiModel: localStorage.getItem('gem_gemini_model') || '',  // chosen Gemini model id
   geminiSize: localStorage.getItem('gem_gemini_size') || '',    // chosen output resolution
   geminiTemperature: localStorage.getItem('gem_gemini_temperature') ?? '',  // '' = model default
+  openaiModel: localStorage.getItem('gem_openai_model') || '',  // chosen OpenAI model id
   queue: [],            // [{ id, name, data(dataURL), status, result, note, error }]
   library: { gemini: [], openai: [] },   // per-engine list of strict prompts (from files)
   selectedPromptId: null,
@@ -595,6 +601,10 @@ function findPrompt(id) {
 function currentKeepScene() {
   if (S.promptMode === 'custom') return false;
   return !!findPrompt(S.selectedPromptId)?.keepScene;
+}
+// Which model id to send with /api/generate — depends on which engine is active.
+function currentModel() {
+  return S.engine === 'openai' ? S.openaiModel : S.geminiModel;
 }
 
 // Load the prompt library from the backend (persisted server-side, seeded from
@@ -628,6 +638,7 @@ async function loadServerConfig() {
     if (Array.isArray(cfg.geminiModels)) GEMINI_MODELS = cfg.geminiModels;
     if (Array.isArray(cfg.geminiSizes)) GEMINI_SIZES = cfg.geminiSizes;
     if (Array.isArray(cfg.geminiTemperatures)) GEMINI_TEMPERATURES = cfg.geminiTemperatures;
+    if (Array.isArray(cfg.openaiModels)) OPENAI_MODELS = cfg.openaiModels;
     // Default the pickers to the server defaults, unless a valid choice is remembered.
     if (!GEMINI_MODELS.some(m => m.id === S.geminiModel)) {
       S.geminiModel = cfg.geminiModelDefault || MODELS.gemini || (GEMINI_MODELS[0] && GEMINI_MODELS[0].id) || '';
@@ -638,12 +649,16 @@ async function loadServerConfig() {
     if (!GEMINI_TEMPERATURES.some(t => t.id === S.geminiTemperature)) {
       S.geminiTemperature = cfg.geminiTemperatureDefault ?? '';
     }
+    if (!OPENAI_MODELS.some(m => m.id === S.openaiModel)) {
+      S.openaiModel = cfg.openaiModelDefault || MODELS.openai || (OPENAI_MODELS[0] && OPENAI_MODELS[0].id) || '';
+    }
   } catch (e) {
     console.warn('Could not load /api/config:', e.message);
   }
   populateModelPicker();
   populateSizePicker();
   populateTemperaturePicker();
+  populateOpenaiModelPicker();
   // Scoped to #engine-toggle: the prompt-mode toggle reuses .engine-opt purely
   // for styling and has no data-engine, so an unscoped selector would disable it.
   document.querySelectorAll('#engine-toggle .engine-opt').forEach(o => {
@@ -670,6 +685,7 @@ function selectEngine(engine) {
   document.getElementById('model-picker').style.display = (engine === 'gemini' && GEMINI_MODELS.length) ? '' : 'none';
   document.getElementById('size-picker').style.display = (engine === 'gemini' && GEMINI_SIZES.length) ? '' : 'none';
   document.getElementById('temperature-picker').style.display = (engine === 'gemini' && GEMINI_TEMPERATURES.length) ? '' : 'none';
+  document.getElementById('openai-model-picker').style.display = (engine === 'openai' && OPENAI_MODELS.length) ? '' : 'none';
   updateEngineNote();
   document.getElementById('library-title').textContent = 'Approved Prompts · ' + label;
   // Auto-select the first prompt of this engine, unless the current one belongs to it.
@@ -681,7 +697,12 @@ function selectEngine(engine) {
 
 function updateEngineNote() {
   const note = document.getElementById('engine-note');
-  if (S.engine === 'openai') { note.textContent = 'Uses ' + MODELS.openai + ' (image edits)'; return; }
+  if (S.engine === 'openai') {
+    const oOpt = OPENAI_MODELS.find(m => m.id === S.openaiModel);
+    if (!oOpt) { note.textContent = 'Uses ' + (S.openaiModel || MODELS.openai) + ' (image edits)'; return; }
+    note.textContent = oOpt.id + ' (image edits)' + (oOpt.hint ? ' · ' + oOpt.hint : '');
+    return;
+  }
   const opt = GEMINI_MODELS.find(m => m.id === S.geminiModel);
   const sizeTxt = S.geminiSize ? ' · ' + S.geminiSize : '';
   const tempTxt = S.geminiTemperature !== '' ? ' · temp ' + S.geminiTemperature : '';
@@ -708,6 +729,28 @@ function onModelChange() {
   const sel = document.getElementById('gemini-model');
   S.geminiModel = sel.value;
   localStorage.setItem('gem_gemini_model', S.geminiModel);
+  updateEngineNote();
+}
+
+// Populate the OpenAI model dropdown from the server allow-list.
+function populateOpenaiModelPicker() {
+  const sel = document.getElementById('openai-model');
+  if (!sel) return;
+  sel.innerHTML = '';
+  OPENAI_MODELS.forEach(m => {
+    const o = document.createElement('option');
+    o.value = m.id;
+    o.textContent = m.label + ' (' + m.id + ')' + (m.id === MODELS.openai ? '  (default)' : '');
+    o.title = m.hint || '';
+    sel.appendChild(o);
+  });
+  if (S.openaiModel) sel.value = S.openaiModel;
+}
+
+function onOpenaiModelChange() {
+  const sel = document.getElementById('openai-model');
+  S.openaiModel = sel.value;
+  localStorage.setItem('gem_openai_model', S.openaiModel);
   updateEngineNote();
 }
 
@@ -1028,7 +1071,7 @@ async function runBatch() {
       setItemStatus(q.id, 'processing');
       btn.innerHTML = '<div class="btn-spinner"></div> Generating ' + (done + failed + 1) + ' / ' + total + '…';
       try {
-        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, S.geminiModel, S.geminiSize, S.geminiTemperature, currentKeepScene());
+        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene());
         q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done'; done++;
       } catch (err) {
         q.error = err.message || String(err); q.status = 'error'; failed++;
@@ -1065,7 +1108,7 @@ async function regenerateOne(id) {
   renderQueue();
   renderResults();
   try {
-    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, S.geminiModel, S.geminiSize, S.geminiTemperature, currentKeepScene());
+    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene());
     q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done';
   } catch (err) {
     q.error = err.message || String(err); q.status = 'error';

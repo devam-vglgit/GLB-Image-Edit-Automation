@@ -283,6 +283,20 @@ if (!GEMINI_MODEL_OPTIONS.some(m => m.id === GEMINI_MODEL)) {
 }
 const GEMINI_MODEL_IDS = GEMINI_MODEL_OPTIONS.map(m => m.id);
 
+// OpenAI image models the user can pick from in the UI dropdown. gpt-image-1
+// and gpt-image-1-mini are being phased out in favour of gpt-image-2 (exact
+// shutdown date unconfirmed as of writing — check platform.openai.com/docs
+// /deprecations before removing the older ones outright).
+const OPENAI_MODEL_OPTIONS = [
+  { id: 'gpt-image-1', label: 'GPT Image 1', hint: 'Current default — being deprecated, migrate when convenient' },
+  { id: 'gpt-image-1-mini', label: 'GPT Image 1 Mini', hint: 'Cheaper/faster — also being deprecated' },
+  { id: 'gpt-image-2', label: 'GPT Image 2', hint: 'Recommended replacement — verify access on your OpenAI account first' }
+];
+if (!OPENAI_MODEL_OPTIONS.some(m => m.id === OPENAI_MODEL)) {
+  OPENAI_MODEL_OPTIONS.unshift({ id: OPENAI_MODEL, label: OPENAI_MODEL, hint: 'From server config' });
+}
+const OPENAI_MODEL_IDS = OPENAI_MODEL_OPTIONS.map(m => m.id);
+
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 
@@ -329,7 +343,9 @@ app.get('/api/config', (req, res) => {
     geminiSizes: GEMINI_SIZE_OPTIONS,        // selectable output resolutions
     geminiSizeDefault: GEMINI_IMAGE_SIZE,
     geminiTemperatures: GEMINI_TEMPERATURE_OPTIONS,  // selectable temperature presets
-    geminiTemperatureDefault: ''                     // '' = no override, model's own default
+    geminiTemperatureDefault: '',                    // '' = no override, model's own default
+    openaiModels: OPENAI_MODEL_OPTIONS,      // selectable options for the dropdown
+    openaiModelDefault: OPENAI_MODEL         // the env default (pre-selected)
   });
 });
 
@@ -374,10 +390,12 @@ app.post('/api/generate', async (req, res) => {
     const geminiModel = (model && GEMINI_MODEL_IDS.includes(model)) ? model : GEMINI_MODEL;
     const geminiSize = (imageSize && GEMINI_SIZE_IDS.includes(imageSize)) ? imageSize : GEMINI_IMAGE_SIZE;
     const geminiTemperature = GEMINI_TEMPERATURE_IDS.includes(temperature) ? temperature : '';
+    // Same pattern for OpenAI: only honour the requested model if it's in the allow-list.
+    const openaiModel = (model && OPENAI_MODEL_IDS.includes(model)) ? model : OPENAI_MODEL;
 
     const out = engine === 'gemini'
       ? await generateGemini(image, prompt, geminiModel, geminiSize, geminiTemperature)
-      : await generateOpenAI(image, prompt, ratio);
+      : await generateOpenAI(image, prompt, ratio, openaiModel);
 
     // On-model / worn shots (keepScene) keep their real scene, so the white-background
     // post-processing (metal black-lift) must be SKIPPED — those assume a
@@ -446,8 +464,9 @@ async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
 }
 
 // ── OpenAI gpt-image-1 edits ──
-async function generateOpenAI(imageDataUrl, prompt, ratio) {
+async function generateOpenAI(imageDataUrl, prompt, ratio, model) {
   if (!OPENAI_KEY) throw httpErr(503, 'OpenAI is not configured on the server (missing OPENAI_API_KEY).');
+  const openaiModel = model || OPENAI_MODEL;
   const { b64 } = splitDataUrl(imageDataUrl);
   const buf = Buffer.from(b64, 'base64');
   // Re-encode to a proper RGBA PNG. OpenAI's edit endpoint rejects mismatched
@@ -457,7 +476,7 @@ async function generateOpenAI(imageDataUrl, prompt, ratio) {
   try { pngBuf = await (await Jimp.read(buf)).getBufferAsync(Jimp.MIME_PNG); }
   catch (e) { console.warn('[openai] PNG re-encode failed, sending raw:', e.message); }
   const fd = new FormData();
-  fd.append('model', OPENAI_MODEL);
+  fd.append('model', openaiModel);
   fd.append('image', new Blob([pngBuf], { type: 'image/png' }), 'input.png');
   fd.append('prompt', prompt);
   const sizeMap = { '1:1': '1024x1024', '4:5': '1024x1536', '16:9': '1536x1024' };
@@ -484,7 +503,7 @@ async function generateOpenAI(imageDataUrl, prompt, ratio) {
     outputTokens: u.output_tokens || 0,
     totalTokens: u.total_tokens || ((u.input_tokens || 0) + (u.output_tokens || 0))
   };
-  return { image: `data:image/png;base64,${b64out}`, note: '', usage, model: OPENAI_MODEL };
+  return { image: `data:image/png;base64,${b64out}`, note: '', usage, model: openaiModel };
 }
 
 // ── helpers ──
