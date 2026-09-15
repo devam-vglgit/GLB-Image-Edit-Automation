@@ -300,6 +300,18 @@ if (!OPENAI_MODEL_OPTIONS.some(m => m.id === OPENAI_MODEL)) {
 }
 const OPENAI_MODEL_IDS = OPENAI_MODEL_OPTIONS.map(m => m.id);
 
+// Fidelity: OpenAI's input_fidelity parameter on /images/edits, controlling
+// how faithfully the output preserves the input image's details. Default ''
+// means "don't send it" — leaves the model's own default behaviour unchanged
+// unless picked. 'high' is the one most likely to help this app's exact
+// geometry/design preservation goals, at the cost of more tokens per image.
+const OPENAI_FIDELITY_OPTIONS = [
+  { id: '', label: 'Model default', hint: 'No override — current behaviour' },
+  { id: 'low', label: 'Low', hint: 'Faster / cheaper — less faithful to the input image' },
+  { id: 'high', label: 'High', hint: 'Most faithful to the input image — uses more tokens' }
+];
+const OPENAI_FIDELITY_IDS = OPENAI_FIDELITY_OPTIONS.map(f => f.id);
+
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
 
@@ -348,7 +360,9 @@ app.get('/api/config', (req, res) => {
     geminiTemperatures: GEMINI_TEMPERATURE_OPTIONS,  // selectable temperature presets
     geminiTemperatureDefault: '',                    // '' = no override, model's own default
     openaiModels: OPENAI_MODEL_OPTIONS,      // selectable options for the dropdown
-    openaiModelDefault: OPENAI_MODEL         // the env default (pre-selected)
+    openaiModelDefault: OPENAI_MODEL,        // the env default (pre-selected)
+    openaiFidelities: OPENAI_FIDELITY_OPTIONS,  // selectable input_fidelity presets
+    openaiFidelityDefault: ''                   // '' = no override, model's own default
   });
 });
 
@@ -385,7 +399,7 @@ app.post('/api/prompts/reset', (req, res) => {
 
 app.post('/api/generate', async (req, res) => {
   try {
-    const { engine, image, prompt, ratio, model, imageSize, temperature, keepScene } = req.body || {};
+    const { engine, image, prompt, ratio, model, imageSize, temperature, fidelity, keepScene } = req.body || {};
     if (!image || !prompt) return res.status(400).json({ error: 'image and prompt are required.' });
     if (!engine || !['gemini', 'openai'].includes(engine)) return res.status(400).json({ error: 'engine must be "gemini" or "openai".' });
 
@@ -393,12 +407,13 @@ app.post('/api/generate', async (req, res) => {
     const geminiModel = (model && GEMINI_MODEL_IDS.includes(model)) ? model : GEMINI_MODEL;
     const geminiSize = (imageSize && GEMINI_SIZE_IDS.includes(imageSize)) ? imageSize : GEMINI_IMAGE_SIZE;
     const geminiTemperature = GEMINI_TEMPERATURE_IDS.includes(temperature) ? temperature : '';
-    // Same pattern for OpenAI: only honour the requested model if it's in the allow-list.
+    // Same pattern for OpenAI: only honour the requested model/fidelity if it's in the allow-list.
     const openaiModel = (model && OPENAI_MODEL_IDS.includes(model)) ? model : OPENAI_MODEL;
+    const openaiFidelity = OPENAI_FIDELITY_IDS.includes(fidelity) ? fidelity : '';
 
     const out = engine === 'gemini'
       ? await generateGemini(image, prompt, geminiModel, geminiSize, geminiTemperature)
-      : await generateOpenAI(image, prompt, ratio, openaiModel);
+      : await generateOpenAI(image, prompt, ratio, openaiModel, openaiFidelity);
 
     // On-model / worn shots (keepScene) keep their real scene, so the white-background
     // post-processing (metal black-lift) must be SKIPPED — those assume a
@@ -467,7 +482,7 @@ async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
 }
 
 // ── OpenAI gpt-image-1 edits ──
-async function generateOpenAI(imageDataUrl, prompt, ratio, model) {
+async function generateOpenAI(imageDataUrl, prompt, ratio, model, fidelity) {
   if (!OPENAI_KEY) throw httpErr(503, 'OpenAI is not configured on the server (missing OPENAI_API_KEY).');
   const openaiModel = model || OPENAI_MODEL;
   const { b64 } = splitDataUrl(imageDataUrl);
@@ -484,6 +499,10 @@ async function generateOpenAI(imageDataUrl, prompt, ratio, model) {
   fd.append('prompt', prompt);
   const sizeMap = { '1:1': '1024x1024', '4:5': '1024x1536', '16:9': '1536x1024' };
   if (sizeMap[ratio]) fd.append('size', sizeMap[ratio]);
+  // input_fidelity: how faithfully the output preserves the input image's
+  // details ('high'/'low'). Only sent when explicitly picked — omitting it
+  // leaves the model's own default behaviour unchanged.
+  if (fidelity) fd.append('input_fidelity', fidelity);
 
   const resp = await fetchWithRetry('https://api.openai.com/v1/images/edits', {
     method: 'POST',

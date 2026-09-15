@@ -436,6 +436,10 @@ footer span { color: var(--gold); }
       <label for="openai-model">Model</label>
       <select id="openai-model" onchange="onOpenaiModelChange()"></select>
     </div>
+    <div class="model-picker" id="openai-fidelity-picker" style="display:none;">
+      <label for="openai-fidelity">Fidelity</label>
+      <select id="openai-fidelity" onchange="onOpenaiFidelityChange()"></select>
+    </div>
     <span id="engine-note" style="font-size:12px;color:var(--ink-faint);"></span>
   </div>
 
@@ -568,6 +572,7 @@ let GEMINI_MODELS = [];             // [{id,label,hint}] selectable options from
 let GEMINI_SIZES = [];              // [{id,label,hint}] selectable output resolutions
 let GEMINI_TEMPERATURES = [];       // [{id,label,hint}] selectable temperature presets ('' = model default)
 let OPENAI_MODELS = [];             // [{id,label,hint}] selectable OpenAI models from the server
+let OPENAI_FIDELITIES = [];         // [{id,label,hint}] selectable input_fidelity presets ('' = model default)
 
 const RING_TOKEN = '[YOUR RING DESIGN]';
 
@@ -579,6 +584,7 @@ const S = {
   geminiSize: localStorage.getItem('gem_gemini_size') || '',    // chosen output resolution
   geminiTemperature: localStorage.getItem('gem_gemini_temperature') ?? '',  // '' = model default
   openaiModel: localStorage.getItem('gem_openai_model') || '',  // chosen OpenAI model id
+  openaiFidelity: localStorage.getItem('gem_openai_fidelity') ?? '',  // '' = model default
   queue: [],            // [{ id, name, data(dataURL), status, result, note, error }]
   library: { gemini: [], openai: [] },   // per-engine list of strict prompts (from files)
   selectedPromptId: null,
@@ -605,6 +611,11 @@ function currentKeepScene() {
 // Which model id to send with /api/generate — depends on which engine is active.
 function currentModel() {
   return S.engine === 'openai' ? S.openaiModel : S.geminiModel;
+}
+// OpenAI's fidelity (input_fidelity) has no Gemini equivalent — only relevant
+// when the OpenAI engine is active.
+function currentFidelity() {
+  return S.engine === 'openai' ? S.openaiFidelity : '';
 }
 
 // Load the prompt library from the backend (persisted server-side, seeded from
@@ -639,6 +650,7 @@ async function loadServerConfig() {
     if (Array.isArray(cfg.geminiSizes)) GEMINI_SIZES = cfg.geminiSizes;
     if (Array.isArray(cfg.geminiTemperatures)) GEMINI_TEMPERATURES = cfg.geminiTemperatures;
     if (Array.isArray(cfg.openaiModels)) OPENAI_MODELS = cfg.openaiModels;
+    if (Array.isArray(cfg.openaiFidelities)) OPENAI_FIDELITIES = cfg.openaiFidelities;
     // Default the pickers to the server defaults, unless a valid choice is remembered.
     if (!GEMINI_MODELS.some(m => m.id === S.geminiModel)) {
       S.geminiModel = cfg.geminiModelDefault || MODELS.gemini || (GEMINI_MODELS[0] && GEMINI_MODELS[0].id) || '';
@@ -657,12 +669,16 @@ async function loadServerConfig() {
     if (!OPENAI_MODELS.some(m => m.id === S.openaiModel)) {
       S.openaiModel = '';
     }
+    if (!OPENAI_FIDELITIES.some(f => f.id === S.openaiFidelity)) {
+      S.openaiFidelity = cfg.openaiFidelityDefault ?? '';
+    }
   } catch (e) {
     console.warn('Could not load /api/config:', e.message);
   }
   populateModelPicker();
   populateSizePicker();
   populateTemperaturePicker();
+  populateOpenaiFidelityPicker();
   populateOpenaiModelPicker();
   // Scoped to #engine-toggle: the prompt-mode toggle reuses .engine-opt purely
   // for styling and has no data-engine, so an unscoped selector would disable it.
@@ -691,6 +707,7 @@ function selectEngine(engine) {
   document.getElementById('size-picker').style.display = (engine === 'gemini' && GEMINI_SIZES.length) ? '' : 'none';
   document.getElementById('temperature-picker').style.display = (engine === 'gemini' && GEMINI_TEMPERATURES.length) ? '' : 'none';
   document.getElementById('openai-model-picker').style.display = (engine === 'openai' && OPENAI_MODELS.length) ? '' : 'none';
+  document.getElementById('openai-fidelity-picker').style.display = (engine === 'openai' && OPENAI_FIDELITIES.length) ? '' : 'none';
   updateEngineNote();
   document.getElementById('library-title').textContent = 'Approved Prompts · ' + label;
   // Auto-select the first prompt of this engine, unless the current one belongs to it.
@@ -704,8 +721,9 @@ function updateEngineNote() {
   const note = document.getElementById('engine-note');
   if (S.engine === 'openai') {
     const oOpt = OPENAI_MODELS.find(m => m.id === S.openaiModel);
-    if (!oOpt) { note.textContent = 'Uses ' + (S.openaiModel || MODELS.openai) + ' (image edits)'; return; }
-    note.textContent = oOpt.id + ' (image edits)' + (oOpt.hint ? ' · ' + oOpt.hint : '');
+    const fidTxt = S.openaiFidelity ? ' · fidelity ' + S.openaiFidelity : '';
+    if (!oOpt) { note.textContent = 'Uses ' + (S.openaiModel || MODELS.openai) + ' (image edits)' + fidTxt; return; }
+    note.textContent = oOpt.id + ' (image edits)' + fidTxt + (oOpt.hint ? ' · ' + oOpt.hint : '');
     return;
   }
   const opt = GEMINI_MODELS.find(m => m.id === S.geminiModel);
@@ -807,6 +825,28 @@ function onTemperatureChange() {
   const sel = document.getElementById('gemini-temperature');
   S.geminiTemperature = sel.value;
   localStorage.setItem('gem_gemini_temperature', S.geminiTemperature);
+  updateEngineNote();
+}
+
+// Populate the OpenAI fidelity (input_fidelity) dropdown.
+function populateOpenaiFidelityPicker() {
+  const sel = document.getElementById('openai-fidelity');
+  if (!sel) return;
+  sel.innerHTML = '';
+  OPENAI_FIDELITIES.forEach(f => {
+    const o = document.createElement('option');
+    o.value = f.id;
+    o.textContent = f.label + (f.hint ? ' — ' + f.hint : '');
+    o.title = f.hint || '';
+    sel.appendChild(o);
+  });
+  sel.value = S.openaiFidelity;
+}
+
+function onOpenaiFidelityChange() {
+  const sel = document.getElementById('openai-fidelity');
+  S.openaiFidelity = sel.value;
+  localStorage.setItem('gem_openai_fidelity', S.openaiFidelity);
   updateEngineNote();
 }
 
@@ -1084,7 +1124,7 @@ async function runBatch() {
       setItemStatus(q.id, 'processing');
       btn.innerHTML = '<div class="btn-spinner"></div> Generating ' + (done + failed + 1) + ' / ' + total + '…';
       try {
-        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene());
+        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity());
         q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done'; done++;
       } catch (err) {
         q.error = err.message || String(err); q.status = 'error'; failed++;
@@ -1122,7 +1162,7 @@ async function regenerateOne(id) {
   renderQueue();
   renderResults();
   try {
-    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene());
+    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity());
     q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done';
   } catch (err) {
     q.error = err.message || String(err); q.status = 'error';
@@ -1134,11 +1174,11 @@ async function regenerateOne(id) {
 }
 
 // ── Call our backend, which holds the keys and proxies the provider ──
-async function generateViaBackend(engine, imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene) {
+async function generateViaBackend(engine, imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene, fidelity) {
   const resp = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ engine, image: imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene })
+    body: JSON.stringify({ engine, image: imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene, fidelity })
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || ('Server error ' + resp.status));
