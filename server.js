@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const Jimp = require('jimp');
 const { padToSquare } = require('./squarepad');
 const { liftMetalBlacks } = require('./metalfix');
+const usageLog = require('./usage');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -410,6 +411,27 @@ app.post('/api/prompts/reset', (req, res) => {
   }
 });
 
+// Generation counts, filtered by date range and/or model.
+//   ?from=YYYY-MM-DD&to=YYYY-MM-DD&models=gemini:gemini-3-pro-image,openai:gpt-image-1
+// All params optional — omitting them returns everything ever recorded.
+app.get('/api/usage', (req, res) => {
+  try {
+    const { from, to, models } = req.query;
+    const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+    const modelList = typeof models === 'string' && models.trim()
+      ? models.split(',').map(s => s.trim()).filter(Boolean)
+      : [];
+    res.json(usageLog.query({
+      from: isDate(from) ? from : undefined,
+      to: isDate(to) ? to : undefined,
+      models: modelList
+    }));
+  } catch (e) {
+    console.error('[usage:query]', e);
+    res.status(500).json({ error: 'Could not read usage data. Check the server log for details.' });
+  }
+});
+
 app.post('/api/generate', async (req, res) => {
   try {
     const { engine, image, prompt, ratio, model, imageSize, temperature, fidelity, keepScene } = req.body || {};
@@ -434,6 +456,12 @@ app.post('/api/generate', async (req, res) => {
     // Square crop is disabled: output keeps the same aspect ratio as the input.
     if (!keepScene && out && out.image) {
       out.image = await liftMetalBlacks(out.image);   // lift near-black metal reflections
+    }
+
+    // Count it only once an image actually came back. Regenerations land here
+    // too (they re-POST to this same route), so each one adds to the tally.
+    if (out && out.image) {
+      usageLog.recordGeneration(engine, engine === 'gemini' ? geminiModel : openaiModel);
     }
 
     res.json(out);

@@ -324,6 +324,22 @@ header {
 .modal-close:hover { color: var(--gold-light); }
 .modal-body { padding: 20px 24px; max-height: 60vh; overflow-y: auto; }
 .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 10px; background: #fff; }
+/* Usage / generation report */
+.usage-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 4px; }
+.usage-filters label { display: block; font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 6px; }
+.usage-filters input[type=date], .usage-filters select { width: 100%; padding: 8px 10px; border: 1.5px solid var(--border-strong); border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 13px; background: #fff; color: var(--ink); outline: none; }
+.usage-filters input[type=date]:focus, .usage-filters select:focus { border-color: var(--gold); }
+.usage-models-wrap { grid-column: 1 / -1; }
+.usage-hint { font-size: 11px; color: var(--ink-faint); margin-top: 6px; }
+.usage-total { font-family: 'Cormorant Garamond', serif; font-size: 36px; color: var(--ink); line-height: 1.1; }
+.usage-total-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 4px; }
+.usage-summary { background: #fff; border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; margin: 18px 0; }
+.usage-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--ink-faint); margin: 18px 0 8px; font-weight: 500; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.usage-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-faint); font-weight: 500; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+.usage-table td { padding: 8px 6px; border-bottom: 1px solid var(--border); color: var(--ink-muted); }
+.usage-table td.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 500; }
+.usage-empty { font-size: 13px; color: var(--ink-faint); padding: 20px 0; text-align: center; }
 .pl-item { background: #fff; border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px; margin-bottom: 12px; }
 .pl-item input.pl-title { width: 100%; padding: 8px 12px; border: 1.5px solid var(--border-strong); border-radius: var(--radius); font-size: 14px; font-weight: 500; font-family: 'DM Sans', sans-serif; margin-bottom: 8px; outline: none; color: var(--ink); }
 .pl-item textarea.pl-text { width: 100%; min-height: 90px; padding: 10px 12px; border: 1.5px solid var(--border-strong); border-radius: var(--radius); font-size: 13px; font-family: 'DM Sans', sans-serif; line-height: 1.6; resize: vertical; outline: none; color: var(--ink); }
@@ -384,6 +400,7 @@ footer span { color: var(--gold); }
   </div>
   <nav class="header-nav">
     <a href="#app">Generator</a>
+    <a href="#" onclick="event.preventDefault();openUsageReport()">📊 Report</a>
     <a href="#" onclick="event.preventDefault();openPromptManager()">⚙ Settings</a>
     <a href="#" onclick="event.preventDefault();fetch('/api/logout',{method:'POST'}).then(()=>window.location.href='/login.html')">Logout</a>
     <span class="api-badge">Gemini · OpenAI</span>
@@ -525,6 +542,41 @@ footer span { color: var(--gold); }
 </div>
 
 <!-- Prompt Manager Modal -->
+<!-- Generation report: how many images were produced, by day and model -->
+<div class="modal-overlay" id="usage-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>📊 Generation Report</h3>
+      <button class="modal-close" onclick="closeUsageReport()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="usage-filters">
+        <div>
+          <label for="usage-from">From</label>
+          <input type="date" id="usage-from">
+        </div>
+        <div>
+          <label for="usage-to">To</label>
+          <input type="date" id="usage-to">
+        </div>
+        <div class="usage-models-wrap">
+          <label for="usage-models">Models</label>
+          <select id="usage-models" multiple size="7"></select>
+          <p class="usage-hint">Hold Ctrl (or Cmd) to select more than one. Leave all unselected to include every model.</p>
+        </div>
+      </div>
+      <div id="usage-results"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="clearUsageFilters()">Clear filters</button>
+      <div style="display:flex;gap:10px;">
+        <button class="btn-secondary" onclick="closeUsageReport()">Close</button>
+        <button class="btn-primary" onclick="loadUsageReport()">Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="pm-overlay">
   <div class="modal">
     <div class="modal-header">
@@ -979,6 +1031,119 @@ async function resetPromptsToFile() {
   }
 }
 function closePromptManager() { document.getElementById('pm-overlay').classList.remove('open'); }
+
+// ═══ Generation report ═══
+// Counts come from the server's own log (data/usage.json), which records
+// every successful generation — including regenerations, since those go
+// through the same endpoint.
+function openUsageReport() {
+  populateUsageModelPicker();
+  document.getElementById('usage-overlay').classList.add('open');
+  loadUsageReport();
+}
+function closeUsageReport() { document.getElementById('usage-overlay').classList.remove('open'); }
+
+// Model options are grouped by engine, valued "engine:modelId" so the two
+// engines can never collide on a shared model name.
+function populateUsageModelPicker() {
+  const sel = document.getElementById('usage-models');
+  if (!sel || sel.dataset.filled === '1') return;   // keep the user's selection across opens
+  sel.innerHTML = '';
+  const groups = [
+    ['✨ Gemini', 'gemini', GEMINI_MODELS],
+    ['🤖 ChatGPT (OpenAI)', 'openai', OPENAI_MODELS]
+  ];
+  groups.forEach(([label, engine, list]) => {
+    if (!list || !list.length) return;
+    const og = document.createElement('optgroup');
+    og.label = label;
+    list.forEach(m => {
+      const o = document.createElement('option');
+      o.value = engine + ':' + m.id;
+      o.textContent = (m.label || m.id) + ' (' + m.id + ')';
+      og.appendChild(o);
+    });
+    sel.appendChild(og);
+  });
+  sel.dataset.filled = '1';
+}
+
+function clearUsageFilters() {
+  document.getElementById('usage-from').value = '';
+  document.getElementById('usage-to').value = '';
+  [...document.getElementById('usage-models').options].forEach(o => { o.selected = false; });
+  loadUsageReport();
+}
+
+async function loadUsageReport() {
+  const box = document.getElementById('usage-results');
+  box.innerHTML = '<div class="usage-empty">Loading…</div>';
+  const from = document.getElementById('usage-from').value;
+  const to = document.getElementById('usage-to').value;
+  const models = [...document.getElementById('usage-models').selectedOptions].map(o => o.value);
+
+  const qs = new URLSearchParams();
+  if (from) qs.set('from', from);
+  if (to) qs.set('to', to);
+  if (models.length) qs.set('models', models.join(','));
+
+  try {
+    const resp = await fetch('/api/usage?' + qs.toString(), { cache: 'no-store' });
+    if (!resp.ok) throw new Error('Server error ' + resp.status);
+    renderUsageReport(await resp.json());
+  } catch (e) {
+    box.innerHTML = '<div class="usage-empty">Could not load the report: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+// Turn "engine:model-id" back into something readable, falling back to the
+// raw id for models that have since been removed from the allow-list.
+function usageModelLabel(id) {
+  const [engine, ...rest] = id.split(':');
+  const modelId = rest.join(':');
+  const list = engine === 'openai' ? OPENAI_MODELS : GEMINI_MODELS;
+  const hit = (list || []).find(m => m.id === modelId);
+  const engineIcon = engine === 'openai' ? '🤖' : '✨';
+  return engineIcon + ' ' + (hit ? hit.label : modelId);
+}
+
+function renderUsageReport(data) {
+  const box = document.getElementById('usage-results');
+  const total = data.total || 0;
+  const byDay = data.byDay || [];
+  const byModel = data.byModel || {};
+
+  let html = '<div class="usage-summary">'
+    + '<div class="usage-total-label">Images generated</div>'
+    + '<div class="usage-total">' + fmt(total) + '</div>'
+    + '</div>';
+
+  if (!total) {
+    box.innerHTML = html + '<div class="usage-empty">Nothing recorded for these filters yet.</div>';
+    return;
+  }
+
+  const modelRows = Object.entries(byModel).sort((a, b) => b[1] - a[1]);
+  html += '<div class="usage-section-title">By model</div><table class="usage-table">'
+    + '<tr><th>Model</th><th style="text-align:right;">Images</th></tr>';
+  modelRows.forEach(([id, count]) => {
+    html += '<tr><td>' + escapeHtml(usageModelLabel(id)) + '</td><td class="num">' + fmt(count) + '</td></tr>';
+  });
+  html += '</table>';
+
+  html += '<div class="usage-section-title">By day</div><table class="usage-table">'
+    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th></tr>';
+  byDay.forEach(d => {
+    const detail = Object.entries(d.models)
+      .sort((a, b) => b[1] - a[1])
+      .map(([id, c]) => escapeHtml(usageModelLabel(id)) + ' ' + fmt(c))
+      .join('<br>');
+    html += '<tr><td>' + escapeHtml(d.day) + '</td><td style="font-size:12px;">' + detail + '</td><td class="num">' + fmt(d.total) + '</td></tr>';
+  });
+  html += '</table>';
+
+  box.innerHTML = html;
+}
 
 // ═══ File handling (queue) ═══
 function dzDragOver(e) { e.preventDefault(); document.getElementById('dz').classList.add('drag-over'); }
