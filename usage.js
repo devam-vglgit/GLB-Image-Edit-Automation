@@ -67,11 +67,33 @@ function recordGeneration(engine, model) {
 
 // Filtered aggregation for the UI.
 //   from/to  — YYYY-MM-DD, inclusive; omit either for an open-ended range
-//   models   — array of "engine:model" strings; omit/empty means all
+//   engines  — array of engine names ("gemini"/"openai"); each means EVERY
+//              model of that engine, including ones no longer offered in the
+//              UI but still present in older log entries
+//   models   — array of specific "engine:model" strings
+//
+// The two selectors are a UNION, and either being empty simply contributes
+// nothing. So:
+//   nothing set                        → everything
+//   engines:['gemini']                 → all Gemini, no OpenAI
+//   models:['openai:gpt-image-1']      → just that one model
+//   engines:['gemini'] + models:[2 GPT ids]
+//                                      → all Gemini plus those two GPT models
+// which is what "tick the Gemini header, then tick two ChatGPT models" sends.
+//
 // Returns totals plus per-day and per-model breakdowns, days newest first.
-function query({ from, to, models } = {}) {
+function query({ from, to, models, engines } = {}) {
   const log = load();
-  const wanted = Array.isArray(models) && models.length ? new Set(models) : null;
+  const wantedModels = Array.isArray(models) && models.length ? new Set(models) : null;
+  const wantedEngines = Array.isArray(engines) && engines.length ? new Set(engines) : null;
+  const filtering = !!(wantedModels || wantedEngines);
+
+  // No filter at all = include everything. Otherwise a row counts if its
+  // whole engine was selected, or that exact model was selected.
+  const isIncluded = (engine, model) =>
+    !filtering
+    || (wantedEngines && wantedEngines.has(engine))
+    || (wantedModels && wantedModels.has(`${engine}:${model}`));
 
   const byDay = [];
   const byModel = {};
@@ -85,8 +107,8 @@ function query({ from, to, models } = {}) {
     const dayModels = {};
     Object.entries(log[day]).forEach(([engine, modelCounts]) => {
       Object.entries(modelCounts).forEach(([model, count]) => {
+        if (!isIncluded(engine, model)) return;
         const id = `${engine}:${model}`;
-        if (wanted && !wanted.has(id)) return;
         dayTotal += count;
         dayModels[id] = (dayModels[id] || 0) + count;
         byModel[id] = (byModel[id] || 0) + count;

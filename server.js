@@ -411,20 +411,26 @@ app.post('/api/prompts/reset', (req, res) => {
   }
 });
 
-// Generation counts, filtered by date range and/or model.
-//   ?from=YYYY-MM-DD&to=YYYY-MM-DD&models=gemini:gemini-3-pro-image,openai:gpt-image-1
+// Generation counts, filtered by date range, whole engine, and/or model.
+//   ?from=YYYY-MM-DD&to=YYYY-MM-DD
+//   &engines=gemini            → every Gemini model
+//   &models=openai:gpt-image-1 → that specific model
+// engines and models are a union, so "all Gemini + two GPT models" is
+// engines=gemini&models=openai:gpt-image-1,openai:gpt-image-2.5-flare.
 // All params optional — omitting them returns everything ever recorded.
 app.get('/api/usage', (req, res) => {
   try {
-    const { from, to, models } = req.query;
+    const { from, to, models, engines } = req.query;
     const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
-    const modelList = typeof models === 'string' && models.trim()
-      ? models.split(',').map(s => s.trim()).filter(Boolean)
+    const csv = v => (typeof v === 'string' && v.trim())
+      ? v.split(',').map(s => s.trim()).filter(Boolean)
       : [];
     res.json(usageLog.query({
       from: isDate(from) ? from : undefined,
       to: isDate(to) ? to : undefined,
-      models: modelList
+      models: csv(models),
+      // only real engine names — ignore anything else a client might send
+      engines: csv(engines).filter(e => e === 'gemini' || e === 'openai')
     }));
   } catch (e) {
     console.error('[usage:query]', e);

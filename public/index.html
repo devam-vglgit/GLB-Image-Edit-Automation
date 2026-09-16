@@ -326,11 +326,23 @@ header {
 .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 10px; background: #fff; }
 /* Usage / generation report */
 .usage-filters { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 4px; }
-.usage-filters label { display: block; font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 6px; }
+/* Direct children only — the checkbox rows inside .ms-box are also <label>s
+   and must not inherit the uppercase field-label styling. */
+.usage-filters > div > label { display: block; font-size: 11px; font-weight: 500; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 6px; }
 .usage-filters input[type=date], .usage-filters select { width: 100%; padding: 8px 10px; border: 1.5px solid var(--border-strong); border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 13px; background: #fff; color: var(--ink); outline: none; }
 .usage-filters input[type=date]:focus, .usage-filters select:focus { border-color: var(--gold); }
 .usage-models-wrap { grid-column: 1 / -1; }
 .usage-hint { font-size: 11px; color: var(--ink-faint); margin-top: 6px; }
+/* Model picker: engine headers are clickable and select/deselect the whole group */
+.ms-box { border: 1.5px solid var(--border-strong); border-radius: var(--radius); background: #fff; max-height: 230px; overflow-y: auto; padding: 4px; }
+.ms-group { display: flex; align-items: center; gap: 8px; padding: 8px 8px; margin-top: 2px; background: var(--surface-warm); border-radius: var(--radius); cursor: pointer; font-size: 13px; font-weight: 500; color: var(--ink); user-select: none; }
+.ms-group:hover { background: #f3ece1; }
+.ms-group-count { margin-left: auto; padding-left: 10px; font-size: 11px; font-weight: 400; color: var(--ink-faint); }
+.ms-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 26px; cursor: pointer; font-size: 13px; color: var(--ink-muted); border-radius: var(--radius); user-select: none; }
+.ms-item:hover { background: var(--surface-warm); color: var(--ink); }
+.ms-item input, .ms-group input { width: 15px; height: 15px; accent-color: var(--ink); cursor: pointer; flex-shrink: 0; }
+.ms-item-id { font-size: 11px; color: var(--ink-faint); margin-left: auto; padding-left: 10px; }
+.ms-summary { font-size: 12px; color: var(--ink-muted); margin-top: 6px; }
 .usage-total { font-family: 'Cormorant Garamond', serif; font-size: 36px; color: var(--ink); line-height: 1.1; }
 .usage-total-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 4px; }
 .usage-summary { background: #fff; border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; margin: 18px 0; }
@@ -560,9 +572,10 @@ footer span { color: var(--gold); }
           <input type="date" id="usage-to">
         </div>
         <div class="usage-models-wrap">
-          <label for="usage-models">Models</label>
-          <select id="usage-models" multiple size="7"></select>
-          <p class="usage-hint">Hold Ctrl (or Cmd) to select more than one. Leave all unselected to include every model.</p>
+          <label>Models</label>
+          <div class="ms-box" id="usage-models"></div>
+          <p class="usage-hint">Click an engine name to select all its models, or tick models individually — you can mix both engines. Nothing ticked = every model.</p>
+          <p class="ms-summary" id="usage-models-summary"></p>
         </div>
       </div>
       <div id="usage-results"></div>
@@ -1043,35 +1056,98 @@ function openUsageReport() {
 }
 function closeUsageReport() { document.getElementById('usage-overlay').classList.remove('open'); }
 
-// Model options are grouped by engine, valued "engine:modelId" so the two
-// engines can never collide on a shared model name.
+// Checkbox list grouped by engine. The engine row is itself a checkbox that
+// selects/deselects every model beneath it, and goes indeterminate when only
+// some are ticked. Model values are "engine:modelId" so the two engines can
+// never collide on a shared model name.
+const USAGE_ENGINE_GROUPS = [
+  { engine: 'gemini', label: '✨ Gemini', list: () => GEMINI_MODELS },
+  { engine: 'openai', label: '🤖 ChatGPT (OpenAI)', list: () => OPENAI_MODELS }
+];
+
 function populateUsageModelPicker() {
-  const sel = document.getElementById('usage-models');
-  if (!sel || sel.dataset.filled === '1') return;   // keep the user's selection across opens
-  sel.innerHTML = '';
-  const groups = [
-    ['✨ Gemini', 'gemini', GEMINI_MODELS],
-    ['🤖 ChatGPT (OpenAI)', 'openai', OPENAI_MODELS]
-  ];
-  groups.forEach(([label, engine, list]) => {
-    if (!list || !list.length) return;
-    const og = document.createElement('optgroup');
-    og.label = label;
-    list.forEach(m => {
-      const o = document.createElement('option');
-      o.value = engine + ':' + m.id;
-      o.textContent = (m.label || m.id) + ' (' + m.id + ')';
-      og.appendChild(o);
+  const box = document.getElementById('usage-models');
+  if (!box || box.dataset.filled === '1') return;   // keep the user's ticks across opens
+  box.innerHTML = '';
+  USAGE_ENGINE_GROUPS.forEach(g => {
+    const models = g.list() || [];
+    if (!models.length) return;
+
+    const head = document.createElement('label');
+    head.className = 'ms-group';
+    head.innerHTML = '<input type="checkbox" class="ms-engine" data-engine="' + g.engine + '">'
+      + '<span>' + escapeHtml(g.label) + '</span>'
+      + '<span class="ms-group-count">' + models.length + ' models</span>';
+    head.querySelector('input').addEventListener('change', e => onUsageEngineToggle(g.engine, e.target.checked));
+    box.appendChild(head);
+
+    models.forEach(m => {
+      const row = document.createElement('label');
+      row.className = 'ms-item';
+      row.innerHTML = '<input type="checkbox" class="ms-model" data-engine="' + g.engine + '" value="'
+        + escapeAttr(g.engine + ':' + m.id) + '">'
+        + '<span>' + escapeHtml(m.label || m.id) + '</span>'
+        + '<span class="ms-item-id">' + escapeHtml(m.id) + '</span>';
+      row.querySelector('input').addEventListener('change', () => { syncUsageEngineBoxes(); updateUsageSelectionSummary(); });
+      box.appendChild(row);
     });
-    sel.appendChild(og);
   });
-  sel.dataset.filled = '1';
+  box.dataset.filled = '1';
+  syncUsageEngineBoxes();
+  updateUsageSelectionSummary();
+}
+
+// Clicking an engine header ticks/unticks all of its models.
+function onUsageEngineToggle(engine, checked) {
+  document.querySelectorAll('#usage-models .ms-model[data-engine="' + engine + '"]')
+    .forEach(cb => { cb.checked = checked; });
+  syncUsageEngineBoxes();
+  updateUsageSelectionSummary();
+}
+
+// Reflect the models' state back onto each engine checkbox: all / none / some.
+function syncUsageEngineBoxes() {
+  USAGE_ENGINE_GROUPS.forEach(g => {
+    const head = document.querySelector('#usage-models .ms-engine[data-engine="' + g.engine + '"]');
+    if (!head) return;
+    const boxes = [...document.querySelectorAll('#usage-models .ms-model[data-engine="' + g.engine + '"]')];
+    const ticked = boxes.filter(b => b.checked).length;
+    head.checked = boxes.length > 0 && ticked === boxes.length;
+    head.indeterminate = ticked > 0 && ticked < boxes.length;
+  });
+}
+
+// Build the filter the API expects: a fully-ticked engine is sent as an
+// engine-wide filter (so it also covers retired models still in the log),
+// while partially-ticked engines send their specific model ids.
+function readUsageModelFilter() {
+  const engines = [];
+  const models = [];
+  USAGE_ENGINE_GROUPS.forEach(g => {
+    const boxes = [...document.querySelectorAll('#usage-models .ms-model[data-engine="' + g.engine + '"]')];
+    if (!boxes.length) return;
+    const ticked = boxes.filter(b => b.checked);
+    if (ticked.length === boxes.length) engines.push(g.engine);
+    else ticked.forEach(b => models.push(b.value));
+  });
+  return { engines, models };
+}
+
+function updateUsageSelectionSummary() {
+  const el = document.getElementById('usage-models-summary');
+  if (!el) return;
+  const { engines, models } = readUsageModelFilter();
+  if (!engines.length && !models.length) { el.textContent = 'Showing: every model'; return; }
+  const parts = engines.map(e => e === 'openai' ? 'all ChatGPT models' : 'all Gemini models');
+  if (models.length) parts.push(models.length + (models.length === 1 ? ' model' : ' models'));
+  el.textContent = 'Showing: ' + parts.join(' + ');
 }
 
 function clearUsageFilters() {
   document.getElementById('usage-from').value = '';
   document.getElementById('usage-to').value = '';
-  [...document.getElementById('usage-models').options].forEach(o => { o.selected = false; });
+  document.querySelectorAll('#usage-models input[type=checkbox]').forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+  updateUsageSelectionSummary();
   loadUsageReport();
 }
 
@@ -1080,11 +1156,12 @@ async function loadUsageReport() {
   box.innerHTML = '<div class="usage-empty">Loading…</div>';
   const from = document.getElementById('usage-from').value;
   const to = document.getElementById('usage-to').value;
-  const models = [...document.getElementById('usage-models').selectedOptions].map(o => o.value);
+  const { engines, models } = readUsageModelFilter();
 
   const qs = new URLSearchParams();
   if (from) qs.set('from', from);
   if (to) qs.set('to', to);
+  if (engines.length) qs.set('engines', engines.join(','));
   if (models.length) qs.set('models', models.join(','));
 
   try {
