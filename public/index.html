@@ -1383,8 +1383,6 @@ function renderUsageReport(data) {
   let html = '<div class="usage-summary" style="display:flex;gap:28px;flex-wrap:wrap;">'
     + '<div><div class="usage-total-label">Images generated</div>'
     + '<div class="usage-total">' + fmt(total) + '</div></div>'
-    + '<div><div class="usage-total-label">Estimated cost</div>'
-    + '<div class="usage-total">' + money(data.cost, data.currency) + '</div></div>'
     + '<div><div class="usage-total-label">Avg. time / image</div>'
     + '<div class="usage-total">' + duration(data.avgMs) + '</div></div>'
     + '</div>';
