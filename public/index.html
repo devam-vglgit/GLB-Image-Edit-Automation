@@ -1361,10 +1361,6 @@ function usageModelLabel(id) {
   return engineIcon + ' ' + (hit ? hit.label : modelId);
 }
 
-function money(n, currency) {
-  const symbol = currency === 'USD' ? '$' : (currency ? currency + ' ' : '');
-  return symbol + (Number(n) || 0).toFixed(2);
-}
 function duration(ms) {
   if (!ms) return '—';
   return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
@@ -1394,12 +1390,11 @@ function renderUsageReport(data) {
 
   if (byUser.length) {
     html += '<div class="usage-section-title">By user</div><table class="usage-table">'
-      + '<tr><th>User</th><th style="text-align:right;">Images</th><th style="text-align:right;">Avg time</th><th style="text-align:right;">Est. cost</th></tr>';
+      + '<tr><th>User</th><th style="text-align:right;">Images</th><th style="text-align:right;">Avg time</th></tr>';
     byUser.forEach(u => {
       html += '<tr><td>' + escapeHtml(u.user) + '</td>'
         + '<td class="num">' + fmt(u.total) + '</td>'
-        + '<td class="num">' + duration(u.avgMs) + '</td>'
-        + '<td class="num">' + money(u.cost, data.currency) + '</td></tr>';
+        + '<td class="num">' + duration(u.avgMs) + '</td></tr>';
     });
     html += '</table>';
   }
@@ -1413,18 +1408,16 @@ function renderUsageReport(data) {
   html += '</table>';
 
   html += '<div class="usage-section-title">By day</div><table class="usage-table">'
-    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th><th style="text-align:right;">Est. cost</th></tr>';
+    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th></tr>';
   byDay.forEach(d => {
     const detail = Object.entries(d.models)
       .sort((a, b) => b[1] - a[1])
       .map(([id, c]) => escapeHtml(usageModelLabel(id)) + ' ' + fmt(c))
       .join('<br>');
     html += '<tr><td>' + escapeHtml(d.day) + '</td><td style="font-size:12px;">' + detail + '</td>'
-      + '<td class="num">' + fmt(d.total) + '</td>'
-      + '<td class="num">' + money(d.cost, data.currency) + '</td></tr>';
+      + '<td class="num">' + fmt(d.total) + '</td></tr>';
   });
-  html += '</table>'
-    + '<p class="usage-hint" style="margin-top:14px;">Costs are estimates from the per-image rate table in <code>data/pricing.json</code> — reconcile against your provider invoice before reporting them.</p>';
+  html += '</table>';
 
   box.innerHTML = html;
 }
