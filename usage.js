@@ -1,53 +1,32 @@
 // ─────────────────────────────────────────────────────────────
-// Daily generation counter
+// Generation log
 //
-// Records every SUCCESSFUL image generation, bucketed by calendar day and
-// by engine + model. Regenerations are counted too — they go through the
-// same /api/generate route, so a batch of 5 followed by 2 regenerations
-// records 7, which is the intent: this counts images produced (and paid
-// for), not images uploaded.
+// Records every SUCCESSFUL generation as one event: who ran it, when, how
+// long it took, which engine/model/size, the token counts the provider
+// reported, and the estimated cost. Regenerations are events too — they go
+// through the same /api/generate route — so a batch of 5 followed by 2
+// regenerations logs 7, i.e. images produced (and paid for).
 //
-// Stored as JSON in data/usage.json. That directory is git-ignored, so the
-// log is per-deployment runtime data and survives `git pull` / restarts.
+// Stored as JSON Lines in data/usage.jsonl: one object per line, appended.
+// Appending is O(1) regardless of how large the log grows, unlike rewriting
+// a single JSON document on every generation.
 //
-// Shape:
-//   { "2026-09-16": { "gemini": { "gemini-3-pro-image": 12 },
-//                     "openai": { "gpt-image-1": 5 } } }
+// data/usage.json (the older aggregate format, which had no user
+// attribution) is still read if present so historical counts aren't lost.
+// Those rows surface under the user "(before tracking)".
 // ─────────────────────────────────────────────────────────────
 const fs = require('fs');
 const path = require('path');
+const pricing = require('./pricing');
 
 const DATA_DIR = path.join(__dirname, 'data');
-const USAGE_FILE = path.join(DATA_DIR, 'usage.json');
+const EVENTS_FILE = path.join(DATA_DIR, 'usage.jsonl');
+const LEGACY_FILE = path.join(DATA_DIR, 'usage.json');
 
-let usage = null;   // in-memory mirror of the file, loaded once at startup
+const LEGACY_USER = '(before tracking)';
 
-function load() {
-  if (usage) return usage;
-  try {
-    usage = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8'));
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.warn('[usage] could not read log, starting fresh:', e.message);
-    usage = {};
-  }
-  return usage;
-}
-
-// Read-modify-write is done synchronously and without awaiting in between,
-// so concurrent generations (3 workers per user, several users) can't
-// interleave and lose each other's increments.
-function save() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(USAGE_FILE, JSON.stringify(usage, null, 2), 'utf8');
-  } catch (e) {
-    // Never let a logging failure break an actual generation.
-    console.error('[usage] could not write log:', e.message);
-  }
-}
-
-// Local calendar date as YYYY-MM-DD (string-comparable, so range filtering
-// is a plain >= / <= on the key).
+// Local calendar date as YYYY-MM-DD — string-comparable, so range filtering
+// is a plain >= / <= on the key.
 function dayKey(d = new Date()) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -55,71 +34,151 @@ function dayKey(d = new Date()) {
   return `${y}-${m}-${day}`;
 }
 
-function recordGeneration(engine, model) {
+function recordGeneration({ user, engine, model, size, durationMs, usage }) {
   if (!engine || !model) return;
-  const log = load();
-  const key = dayKey();
-  if (!log[key]) log[key] = {};
-  if (!log[key][engine]) log[key][engine] = {};
-  log[key][engine][model] = (log[key][engine][model] || 0) + 1;
-  save();
+  const now = new Date();
+  const row = {
+    ts: now.toISOString(),
+    day: dayKey(now),
+    user: user || 'unknown',
+    engine,
+    model,
+    size: size || '',
+    ms: Number(durationMs) || 0,
+    inTok: (usage && usage.promptTokens) || 0,
+    outTok: (usage && usage.outputTokens) || 0,
+    cost: pricing.pricePerImage(engine, model, size)
+  };
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFileSync(EVENTS_FILE, JSON.stringify(row) + '\n', 'utf8');
+  } catch (e) {
+    // Never let a logging failure break an actual generation.
+    console.error('[usage] could not append event:', e.message);
+  }
+}
+
+function readEvents() {
+  let raw;
+  try { raw = fs.readFileSync(EVENTS_FILE, 'utf8'); }
+  catch (e) {
+    if (e.code !== 'ENOENT') console.warn('[usage] could not read event log:', e.message);
+    return [];
+  }
+  const rows = [];
+  raw.split('\n').forEach(line => {
+    if (!line.trim()) return;
+    // One malformed line shouldn't sink the whole report.
+    try { rows.push(JSON.parse(line)); } catch (e) { /* skip */ }
+  });
+  return rows;
+}
+
+// Older aggregate format: { "2026-09-16": { gemini: { model: count } } }.
+// Expanded into event-shaped rows so the report can treat everything the
+// same way. No user, timing or token data existed back then.
+function readLegacy() {
+  let log;
+  try { log = JSON.parse(fs.readFileSync(LEGACY_FILE, 'utf8')); }
+  catch (e) { return []; }
+  const rows = [];
+  Object.entries(log).forEach(([day, engines]) => {
+    Object.entries(engines || {}).forEach(([engine, models]) => {
+      Object.entries(models || {}).forEach(([model, count]) => {
+        for (let i = 0; i < count; i++) {
+          rows.push({
+            ts: '', day, user: LEGACY_USER, engine, model, size: '',
+            ms: 0, inTok: 0, outTok: 0,
+            cost: pricing.pricePerImage(engine, model, '')
+          });
+        }
+      });
+    });
+  });
+  return rows;
 }
 
 // Filtered aggregation for the UI.
 //   from/to  — YYYY-MM-DD, inclusive; omit either for an open-ended range
-//   engines  — array of engine names ("gemini"/"openai"); each means EVERY
-//              model of that engine, including ones no longer offered in the
-//              UI but still present in older log entries
-//   models   — array of specific "engine:model" strings
+//   engines  — engine names; each means EVERY model of that engine,
+//              including ones no longer offered in the UI
+//   models   — specific "engine:model" strings
+//   users    — usernames; omit for everyone
 //
-// The two selectors are a UNION, and either being empty simply contributes
-// nothing. So:
-//   nothing set                        → everything
-//   engines:['gemini']                 → all Gemini, no OpenAI
-//   models:['openai:gpt-image-1']      → just that one model
-//   engines:['gemini'] + models:[2 GPT ids]
-//                                      → all Gemini plus those two GPT models
-// which is what "tick the Gemini header, then tick two ChatGPT models" sends.
-//
-// Returns totals plus per-day and per-model breakdowns, days newest first.
-function query({ from, to, models, engines } = {}) {
-  const log = load();
+// engines and models are a UNION (ticking the Gemini header plus two GPT
+// models means "all Gemini plus those two"). The user filter is applied on
+// top of that, as an AND.
+function query({ from, to, models, engines, users } = {}) {
   const wantedModels = Array.isArray(models) && models.length ? new Set(models) : null;
   const wantedEngines = Array.isArray(engines) && engines.length ? new Set(engines) : null;
-  const filtering = !!(wantedModels || wantedEngines);
+  const wantedUsers = Array.isArray(users) && users.length ? new Set(users) : null;
+  const filteringModels = !!(wantedModels || wantedEngines);
 
-  // No filter at all = include everything. Otherwise a row counts if its
-  // whole engine was selected, or that exact model was selected.
-  const isIncluded = (engine, model) =>
-    !filtering
+  const matchesModel = (engine, model) =>
+    !filteringModels
     || (wantedEngines && wantedEngines.has(engine))
     || (wantedModels && wantedModels.has(`${engine}:${model}`));
 
-  const byDay = [];
+  const rows = readEvents().concat(readLegacy());
+
+  const days = {};
   const byModel = {};
-  let total = 0;
+  const byUser = {};
+  let total = 0, cost = 0, msTotal = 0, timedCount = 0;
 
-  Object.keys(log).sort().reverse().forEach(day => {
-    if (from && day < from) return;
-    if (to && day > to) return;
+  rows.forEach(r => {
+    if (from && r.day < from) return;
+    if (to && r.day > to) return;
+    if (!matchesModel(r.engine, r.model)) return;
+    if (wantedUsers && !wantedUsers.has(r.user)) return;
 
-    let dayTotal = 0;
-    const dayModels = {};
-    Object.entries(log[day]).forEach(([engine, modelCounts]) => {
-      Object.entries(modelCounts).forEach(([model, count]) => {
-        if (!isIncluded(engine, model)) return;
-        const id = `${engine}:${model}`;
-        dayTotal += count;
-        dayModels[id] = (dayModels[id] || 0) + count;
-        byModel[id] = (byModel[id] || 0) + count;
-      });
-    });
+    const id = `${r.engine}:${r.model}`;
+    total += 1;
+    cost += r.cost || 0;
+    if (r.ms > 0) { msTotal += r.ms; timedCount += 1; }
 
-    if (dayTotal > 0) byDay.push({ day, total: dayTotal, models: dayModels });
-    total += dayTotal;
+    if (!days[r.day]) days[r.day] = { day: r.day, total: 0, cost: 0, models: {} };
+    days[r.day].total += 1;
+    days[r.day].cost += r.cost || 0;
+    days[r.day].models[id] = (days[r.day].models[id] || 0) + 1;
+
+    if (!byModel[id]) byModel[id] = 0;
+    byModel[id] += 1;
+
+    if (!byUser[r.user]) byUser[r.user] = { user: r.user, total: 0, cost: 0, ms: 0, timed: 0 };
+    byUser[r.user].total += 1;
+    byUser[r.user].cost += r.cost || 0;
+    if (r.ms > 0) { byUser[r.user].ms += r.ms; byUser[r.user].timed += 1; }
   });
 
-  return { total, byDay, byModel };
+  const byDay = Object.values(days).sort((a, b) => (a.day < b.day ? 1 : -1));
+  const users_ = Object.values(byUser)
+    .map(u => ({
+      user: u.user,
+      total: u.total,
+      cost: u.cost,
+      avgMs: u.timed ? Math.round(u.ms / u.timed) : 0
+    }))
+    .sort((a, b) => b.total - a.total);
+
+  return {
+    total,
+    cost,
+    currency: pricing.currency(),
+    avgMs: timedCount ? Math.round(msTotal / timedCount) : 0,
+    byDay,
+    byModel,
+    byUser: users_
+  };
 }
 
-module.exports = { recordGeneration, query, dayKey };
+// Every username that appears in the log — lets the report offer a user
+// filter that includes people who have since been deleted.
+function knownUsers() {
+  const set = new Set();
+  readEvents().forEach(r => set.add(r.user));
+  if (fs.existsSync(LEGACY_FILE)) set.add(LEGACY_USER);
+  return [...set].sort();
+}
+
+module.exports = { recordGeneration, query, dayKey, knownUsers, LEGACY_USER };

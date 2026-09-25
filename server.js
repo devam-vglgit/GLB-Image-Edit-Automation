@@ -14,6 +14,7 @@ const Jimp = require('jimp');
 const { padToSquare } = require('./squarepad');
 const { liftMetalBlacks } = require('./metalfix');
 const usageLog = require('./usage');
+const userStore = require('./users');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -70,24 +71,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── Auth (multiple fixed username/password pairs, defined in .env) ──
-// Format: AUTH_USERS="alice:pass1,bob:pass2,admin:studioe69" — add or
-// remove a "user:pass" entry and restart the server to add/remove a login.
-// If AUTH_USERS isn't set, falls back to the single legacy AUTH_USERNAME/
-// AUTH_PASSWORD pair (or admin/studioe69) so existing setups keep working.
-function loadAuthUsers() {
-  const raw = process.env.AUTH_USERS || '';
-  const users = new Map();
-  raw.split(',').map(s => s.trim()).filter(Boolean).forEach(pair => {
-    const idx = pair.indexOf(':');
-    if (idx > -1) users.set(pair.slice(0, idx), pair.slice(idx + 1));
-  });
-  if (users.size === 0) {
-    users.set(process.env.AUTH_USERNAME || 'admin', process.env.AUTH_PASSWORD || 'studioe69');
-  }
-  return users;
-}
-const AUTH_USERS = loadAuthUsers();
+// ── Auth ──
+// Accounts now live in data/users.json (see users.js) with salted+hashed
+// passwords, managed by an admin from the UI. AUTH_USERS in .env is only
+// used once, to seed that file on first run, so existing logins keep working.
 const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
 // A random secret per process start is fine for signing — it just means
 // everyone is logged out on restart. Set SESSION_SECRET in .env to persist
@@ -132,9 +119,22 @@ function sessionCookie(req, value, maxAgeSeconds) {
 
 function requireAuth(req, res, next) {
   const session = verifySession(parseCookies(req).session);
-  if (session) return next();
+  if (session) {
+    // Make the signed-in identity available to every downstream route, so
+    // generations can be attributed and admin-only routes can be gated.
+    req.user = session.user;
+    req.isAdmin = userStore.isAdmin(session.user);
+    return next();
+  }
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Not authenticated.' });
   return res.redirect('/login.html');
+}
+
+// Admin-only routes. Deliberately returns 403 (not 404) so an admin
+// debugging a permissions problem gets a clear answer.
+function requireAdmin(req, res, next) {
+  if (req.isAdmin) return next();
+  res.status(403).json({ error: 'Admin access required.' });
 }
 
 // ── Cloudflare Turnstile (bot-check on the login form) ──
@@ -342,10 +342,11 @@ app.post('/api/login', async (req, res) => {
   const { username, password, cfTurnstileToken } = req.body || {};
   const humanVerified = await verifyTurnstile(cfTurnstileToken, req.ip);
   if (!humanVerified) return res.status(401).json({ error: 'Bot check failed. Please retry the challenge.' });
-  if (AUTH_USERS.has(username) && AUTH_USERS.get(username) === password) {
-    const token = signSession({ user: username, exp: Date.now() + SESSION_MAX_AGE_MS });
+  const account = userStore.authenticate(username, password);
+  if (account) {
+    const token = signSession({ user: account.username, exp: Date.now() + SESSION_MAX_AGE_MS });
     res.setHeader('Set-Cookie', sessionCookie(req, token, Math.floor(SESSION_MAX_AGE_MS / 1000)));
-    return res.json({ ok: true });
+    return res.json({ ok: true, user: account.username, role: account.role });
   }
   res.status(401).json({ error: 'Invalid username or password.' });
 });
@@ -411,6 +412,56 @@ app.post('/api/prompts/reset', (req, res) => {
   }
 });
 
+// Who am I — lets the UI show admin-only controls to the right people.
+app.get('/api/me', (req, res) => {
+  res.json({ user: req.user, role: req.isAdmin ? 'admin' : 'user' });
+});
+
+// ── User management (admin only) ──
+app.get('/api/users', requireAdmin, (req, res) => {
+  res.json({ users: userStore.list() });
+});
+
+app.post('/api/users', requireAdmin, (req, res) => {
+  try {
+    const { username, password, role } = req.body || {};
+    res.json({ ok: true, user: userStore.create({ username, password, role }) });
+  } catch (e) {
+    // These messages are deliberate, user-facing validation text (e.g.
+    // "That username already exists") — safe to show, unlike a raw fs error.
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.delete('/api/users/:username', requireAdmin, (req, res) => {
+  try {
+    if (req.params.username === req.user) {
+      return res.status(400).json({ error: 'You cannot delete your own account while signed in.' });
+    }
+    userStore.remove(req.params.username);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/users/:username/password', requireAdmin, (req, res) => {
+  try {
+    userStore.setPassword(req.params.username, (req.body || {}).password);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/users/:username/role', requireAdmin, (req, res) => {
+  try {
+    res.json({ ok: true, user: userStore.setRole(req.params.username, (req.body || {}).role) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // Generation counts, filtered by date range, whole engine, and/or model.
 //   ?from=YYYY-MM-DD&to=YYYY-MM-DD
 //   &engines=gemini            → every Gemini model
@@ -420,17 +471,25 @@ app.post('/api/prompts/reset', (req, res) => {
 // All params optional — omitting them returns everything ever recorded.
 app.get('/api/usage', (req, res) => {
   try {
-    const { from, to, models, engines } = req.query;
+    const { from, to, models, engines, users } = req.query;
     const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
     const csv = v => (typeof v === 'string' && v.trim())
       ? v.split(',').map(s => s.trim()).filter(Boolean)
       : [];
-    res.json(usageLog.query({
+    // Admins can report on anyone; everyone else is pinned to their own
+    // figures regardless of what the client asks for.
+    const userFilter = req.isAdmin ? csv(users) : [req.user];
+    res.json(Object.assign(usageLog.query({
       from: isDate(from) ? from : undefined,
       to: isDate(to) ? to : undefined,
       models: csv(models),
       // only real engine names — ignore anything else a client might send
-      engines: csv(engines).filter(e => e === 'gemini' || e === 'openai')
+      engines: csv(engines).filter(e => e === 'gemini' || e === 'openai'),
+      users: userFilter
+    }), {
+      // The report's user filter is admin-only, so only send the roster to admins.
+      knownUsers: req.isAdmin ? usageLog.knownUsers() : [req.user],
+      isAdmin: !!req.isAdmin
     }));
   } catch (e) {
     console.error('[usage:query]', e);
@@ -452,9 +511,13 @@ app.post('/api/generate', async (req, res) => {
     const openaiModel = (model && OPENAI_MODEL_IDS.includes(model)) ? model : OPENAI_MODEL;
     const openaiFidelity = OPENAI_FIDELITY_IDS.includes(fidelity) ? fidelity : '';
 
+    // Timed around the provider call only, so the figure reflects how long
+    // the model took rather than our own post-processing.
+    const startedAt = Date.now();
     const out = engine === 'gemini'
       ? await generateGemini(image, prompt, geminiModel, geminiSize, geminiTemperature)
       : await generateOpenAI(image, prompt, ratio, openaiModel, openaiFidelity);
+    const durationMs = Date.now() - startedAt;
 
     // On-model / worn shots (keepScene) keep their real scene, so the white-background
     // post-processing (metal black-lift) must be SKIPPED — those assume a
@@ -464,10 +527,17 @@ app.post('/api/generate', async (req, res) => {
       out.image = await liftMetalBlacks(out.image);   // lift near-black metal reflections
     }
 
-    // Count it only once an image actually came back. Regenerations land here
-    // too (they re-POST to this same route), so each one adds to the tally.
+    // Log it only once an image actually came back. Regenerations land here
+    // too (they re-POST to this same route), so each one is its own event.
     if (out && out.image) {
-      usageLog.recordGeneration(engine, engine === 'gemini' ? geminiModel : openaiModel);
+      usageLog.recordGeneration({
+        user: req.user,
+        engine,
+        model: engine === 'gemini' ? geminiModel : openaiModel,
+        size: engine === 'gemini' ? geminiSize : '',
+        durationMs,
+        usage: out.usage
+      });
     }
 
     res.json(out);

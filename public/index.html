@@ -343,6 +343,20 @@ header {
 .ms-item input, .ms-group input { width: 15px; height: 15px; accent-color: var(--ink); cursor: pointer; flex-shrink: 0; }
 .ms-item-id { font-size: 11px; color: var(--ink-faint); margin-left: auto; padding-left: 10px; }
 .ms-summary { font-size: 12px; color: var(--ink-muted); margin-top: 6px; }
+/* User management */
+.um-add { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 8px; align-items: center; }
+.um-add input, .um-add select { padding: 9px 11px; border: 1.5px solid var(--border-strong); border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 13px; color: var(--ink); outline: none; background: #fff; }
+.um-add input:focus, .um-add select:focus { border-color: var(--gold); }
+.um-error { color: #b3261e; font-size: 12px; margin-top: 8px; min-height: 16px; }
+.um-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius-lg); margin-bottom: 8px; }
+.um-name { font-weight: 500; color: var(--ink); font-size: 14px; }
+.um-badge { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; padding: 3px 8px; border-radius: 100px; background: var(--ink); color: var(--gold); }
+.um-badge.user { background: var(--surface-warm); color: var(--ink-muted); }
+.um-meta { font-size: 11px; color: var(--ink-faint); margin-left: auto; }
+.um-actions { display: flex; gap: 6px; }
+.um-actions button { padding: 6px 10px; font-size: 12px; border-radius: var(--radius); border: 1.5px solid var(--border-strong); background: #fff; color: var(--ink-muted); cursor: pointer; font-family: 'DM Sans', sans-serif; }
+.um-actions button:hover { border-color: var(--gold); color: var(--ink); }
+.um-actions button.danger:hover { border-color: #b3261e; color: #b3261e; }
 .usage-total { font-family: 'Cormorant Garamond', serif; font-size: 36px; color: var(--ink); line-height: 1.1; }
 .usage-total-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 4px; }
 .usage-summary { background: #fff; border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; margin: 18px 0; }
@@ -413,6 +427,7 @@ footer span { color: var(--gold); }
   <nav class="header-nav">
     <a href="#app">Generator</a>
     <a href="#" onclick="event.preventDefault();openUsageReport()">📊 Report</a>
+    <a href="#" id="nav-users" style="display:none;" onclick="event.preventDefault();openUserManager()">👥 Users</a>
     <a href="#" onclick="event.preventDefault();openPromptManager()">⚙ Settings</a>
     <a href="#" onclick="event.preventDefault();fetch('/api/logout',{method:'POST'}).then(()=>window.location.href='/login.html')">Logout</a>
     <span class="api-badge">Gemini · OpenAI</span>
@@ -554,6 +569,35 @@ footer span { color: var(--gold); }
 </div>
 
 <!-- Prompt Manager Modal -->
+<!-- User management (admin only; the server enforces the role independently) -->
+<div class="modal-overlay" id="um-overlay">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>👥 Users</h3>
+      <button class="modal-close" onclick="closeUserManager()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="usage-section-title">Add a user</div>
+      <div class="um-add">
+        <input type="text" id="um-new-username" placeholder="Username" autocomplete="off">
+        <input type="password" id="um-new-password" placeholder="Password (min 6 chars)" autocomplete="new-password">
+        <select id="um-new-role">
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+        </select>
+        <button class="btn-primary" onclick="createUser()">＋ Add</button>
+      </div>
+      <p class="um-error" id="um-error"></p>
+      <div class="usage-section-title">Existing users</div>
+      <div id="um-list"></div>
+    </div>
+    <div class="modal-footer">
+      <span style="font-size:11px;color:var(--ink-faint);">Passwords are hashed — they can be reset, never read back.</span>
+      <button class="btn-secondary" onclick="closeUserManager()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- Generation report: how many images were produced, by day and model -->
 <div class="modal-overlay" id="usage-overlay">
   <div class="modal">
@@ -570,6 +614,11 @@ footer span { color: var(--gold); }
         <div>
           <label for="usage-to">To</label>
           <input type="date" id="usage-to">
+        </div>
+        <div class="usage-models-wrap" id="usage-users-wrap" style="display:none;">
+          <label>Users</label>
+          <div class="ms-box" id="usage-users" style="max-height:150px;"></div>
+          <p class="usage-hint">Nothing ticked = everyone.</p>
         </div>
         <div class="usage-models-wrap">
           <label>Models</label>
@@ -699,9 +748,22 @@ async function loadPromptLibrary() {
 
 // ═══ Init ═══
 (async function init() {
-  await Promise.all([loadServerConfig(), loadPromptLibrary()]);
+  await Promise.all([loadServerConfig(), loadPromptLibrary(), loadMe()]);
   selectEngine(S.engine);   // selects the engine's first prompt + renders
 })();
+
+// Who's signed in, and are they an admin? Drives the admin-only nav link and
+// the report's user filter. The server enforces this independently — hiding
+// the link is only a convenience, never the actual access control.
+let ME = { user: '', role: 'user' };
+async function loadMe() {
+  try {
+    const resp = await fetch('/api/me', { cache: 'no-store' });
+    if (resp.ok) ME = await resp.json();
+  } catch (e) { console.warn('Could not load /api/me:', e.message); }
+  if (ME.role === 'admin') document.getElementById('nav-users').style.display = '';
+}
+function isAdmin() { return ME.role === 'admin'; }
 
 // Ask the backend which engines have a key configured + the model names.
 async function loadServerConfig() {
@@ -1045,14 +1107,122 @@ async function resetPromptsToFile() {
 }
 function closePromptManager() { document.getElementById('pm-overlay').classList.remove('open'); }
 
+// ═══ User management (admin) ═══
+function openUserManager() {
+  document.getElementById('um-overlay').classList.add('open');
+  document.getElementById('um-error').textContent = '';
+  loadUserList();
+}
+function closeUserManager() { document.getElementById('um-overlay').classList.remove('open'); }
+
+function umError(msg) { document.getElementById('um-error').textContent = msg || ''; }
+
+async function loadUserList() {
+  const box = document.getElementById('um-list');
+  box.innerHTML = '<div class="usage-empty">Loading…</div>';
+  try {
+    const resp = await fetch('/api/users', { cache: 'no-store' });
+    if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || ('Server error ' + resp.status));
+    const { users } = await resp.json();
+    box.innerHTML = users.map(u => {
+      const created = u.createdAt ? new Date(u.createdAt).toLocaleDateString() : '';
+      const isSelf = u.username === ME.user;
+      return '<div class="um-row">'
+        + '<span class="um-name">' + escapeHtml(u.username) + '</span>'
+        + '<span class="um-badge ' + (u.role === 'admin' ? '' : 'user') + '">' + escapeHtml(u.role) + '</span>'
+        + (isSelf ? '<span class="um-badge user">you</span>' : '')
+        + '<span class="um-meta">' + (created ? 'added ' + escapeHtml(created) : '') + '</span>'
+        + '<span class="um-actions">'
+        + '<button onclick="resetUserPassword(\'' + escapeAttr(u.username) + '\')">Reset password</button>'
+        + '<button onclick="toggleUserRole(\'' + escapeAttr(u.username) + '\',\'' + (u.role === 'admin' ? 'user' : 'admin') + '\')">Make ' + (u.role === 'admin' ? 'user' : 'admin') + '</button>'
+        + (isSelf ? '' : '<button class="danger" onclick="deleteUser(\'' + escapeAttr(u.username) + '\')">Remove</button>')
+        + '</span></div>';
+    }).join('');
+  } catch (e) {
+    box.innerHTML = '<div class="usage-empty">Could not load users: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function umPost(url, body, method) {
+  const resp = await fetch(url, {
+    method: method || 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || ('Server error ' + resp.status));
+  return data;
+}
+
+async function createUser() {
+  umError('');
+  const username = document.getElementById('um-new-username').value.trim();
+  const password = document.getElementById('um-new-password').value;
+  const role = document.getElementById('um-new-role').value;
+  try {
+    await umPost('/api/users', { username, password, role });
+    document.getElementById('um-new-username').value = '';
+    document.getElementById('um-new-password').value = '';
+    loadUserList();
+  } catch (e) { umError(e.message); }
+}
+
+async function deleteUser(username) {
+  if (!confirm('Remove "' + username + '"? They will lose access immediately. Their past generations stay in the report.')) return;
+  umError('');
+  try { await umPost('/api/users/' + encodeURIComponent(username), null, 'DELETE'); loadUserList(); }
+  catch (e) { umError(e.message); }
+}
+
+async function resetUserPassword(username) {
+  const password = prompt('New password for "' + username + '" (min 6 characters):');
+  if (password === null) return;
+  umError('');
+  try { await umPost('/api/users/' + encodeURIComponent(username) + '/password', { password }); umError('Password updated for ' + username + '.'); }
+  catch (e) { umError(e.message); }
+}
+
+async function toggleUserRole(username, role) {
+  umError('');
+  try { await umPost('/api/users/' + encodeURIComponent(username) + '/role', { role }); loadUserList(); }
+  catch (e) { umError(e.message); }
+}
+
 // ═══ Generation report ═══
 // Counts come from the server's own log (data/usage.json), which records
 // every successful generation — including regenerations, since those go
 // through the same endpoint.
 function openUsageReport() {
   populateUsageModelPicker();
+  // The user filter only exists for admins — everyone else is scoped to
+  // their own figures by the server regardless.
+  document.getElementById('usage-users-wrap').style.display = isAdmin() ? '' : 'none';
   document.getElementById('usage-overlay').classList.add('open');
   loadUsageReport();
+}
+
+// Built from whoever actually appears in the log, so people who have since
+// been removed can still be reported on.
+function populateUsageUserPicker(names) {
+  const box = document.getElementById('usage-users');
+  if (!box || !isAdmin()) return;
+  const previously = new Set([...box.querySelectorAll('input:checked')].map(b => b.value));
+  box.innerHTML = '';
+  (names || []).forEach(name => {
+    const row = document.createElement('label');
+    row.className = 'ms-item';
+    row.style.paddingLeft = '8px';
+    row.innerHTML = '<input type="checkbox" value="' + escapeAttr(name) + '"><span>' + escapeHtml(name) + '</span>';
+    const cb = row.querySelector('input');
+    cb.checked = previously.has(name);
+    cb.addEventListener('change', () => {});
+    box.appendChild(row);
+  });
+}
+
+function readUsageUserFilter() {
+  if (!isAdmin()) return [];
+  return [...document.querySelectorAll('#usage-users input:checked')].map(b => b.value);
 }
 function closeUsageReport() { document.getElementById('usage-overlay').classList.remove('open'); }
 
@@ -1147,6 +1317,7 @@ function clearUsageFilters() {
   document.getElementById('usage-from').value = '';
   document.getElementById('usage-to').value = '';
   document.querySelectorAll('#usage-models input[type=checkbox]').forEach(cb => { cb.checked = false; cb.indeterminate = false; });
+  document.querySelectorAll('#usage-users input[type=checkbox]').forEach(cb => { cb.checked = false; });
   updateUsageSelectionSummary();
   loadUsageReport();
 }
@@ -1157,12 +1328,14 @@ async function loadUsageReport() {
   const from = document.getElementById('usage-from').value;
   const to = document.getElementById('usage-to').value;
   const { engines, models } = readUsageModelFilter();
+  const users = readUsageUserFilter();
 
   const qs = new URLSearchParams();
   if (from) qs.set('from', from);
   if (to) qs.set('to', to);
   if (engines.length) qs.set('engines', engines.join(','));
   if (models.length) qs.set('models', models.join(','));
+  if (users.length) qs.set('users', users.join(','));
 
   try {
     const resp = await fetch('/api/usage?' + qs.toString(), { cache: 'no-store' });
@@ -1184,20 +1357,49 @@ function usageModelLabel(id) {
   return engineIcon + ' ' + (hit ? hit.label : modelId);
 }
 
+function money(n, currency) {
+  const symbol = currency === 'USD' ? '$' : (currency ? currency + ' ' : '');
+  return symbol + (Number(n) || 0).toFixed(2);
+}
+function duration(ms) {
+  if (!ms) return '—';
+  return ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+}
+
 function renderUsageReport(data) {
   const box = document.getElementById('usage-results');
   const total = data.total || 0;
   const byDay = data.byDay || [];
   const byModel = data.byModel || {};
+  const byUser = data.byUser || [];
 
-  let html = '<div class="usage-summary">'
-    + '<div class="usage-total-label">Images generated</div>'
-    + '<div class="usage-total">' + fmt(total) + '</div>'
+  // Admin-only user filter is rebuilt from whoever appears in the log.
+  if (isAdmin() && Array.isArray(data.knownUsers)) populateUsageUserPicker(data.knownUsers);
+
+  let html = '<div class="usage-summary" style="display:flex;gap:28px;flex-wrap:wrap;">'
+    + '<div><div class="usage-total-label">Images generated</div>'
+    + '<div class="usage-total">' + fmt(total) + '</div></div>'
+    + '<div><div class="usage-total-label">Estimated cost</div>'
+    + '<div class="usage-total">' + money(data.cost, data.currency) + '</div></div>'
+    + '<div><div class="usage-total-label">Avg. time / image</div>'
+    + '<div class="usage-total">' + duration(data.avgMs) + '</div></div>'
     + '</div>';
 
   if (!total) {
     box.innerHTML = html + '<div class="usage-empty">Nothing recorded for these filters yet.</div>';
     return;
+  }
+
+  if (byUser.length) {
+    html += '<div class="usage-section-title">By user</div><table class="usage-table">'
+      + '<tr><th>User</th><th style="text-align:right;">Images</th><th style="text-align:right;">Avg time</th><th style="text-align:right;">Est. cost</th></tr>';
+    byUser.forEach(u => {
+      html += '<tr><td>' + escapeHtml(u.user) + '</td>'
+        + '<td class="num">' + fmt(u.total) + '</td>'
+        + '<td class="num">' + duration(u.avgMs) + '</td>'
+        + '<td class="num">' + money(u.cost, data.currency) + '</td></tr>';
+    });
+    html += '</table>';
   }
 
   const modelRows = Object.entries(byModel).sort((a, b) => b[1] - a[1]);
@@ -1209,15 +1411,18 @@ function renderUsageReport(data) {
   html += '</table>';
 
   html += '<div class="usage-section-title">By day</div><table class="usage-table">'
-    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th></tr>';
+    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th><th style="text-align:right;">Est. cost</th></tr>';
   byDay.forEach(d => {
     const detail = Object.entries(d.models)
       .sort((a, b) => b[1] - a[1])
       .map(([id, c]) => escapeHtml(usageModelLabel(id)) + ' ' + fmt(c))
       .join('<br>');
-    html += '<tr><td>' + escapeHtml(d.day) + '</td><td style="font-size:12px;">' + detail + '</td><td class="num">' + fmt(d.total) + '</td></tr>';
+    html += '<tr><td>' + escapeHtml(d.day) + '</td><td style="font-size:12px;">' + detail + '</td>'
+      + '<td class="num">' + fmt(d.total) + '</td>'
+      + '<td class="num">' + money(d.cost, data.currency) + '</td></tr>';
   });
-  html += '</table>';
+  html += '</table>'
+    + '<p class="usage-hint" style="margin-top:14px;">Costs are estimates from the per-image rate table in <code>data/pricing.json</code> — reconcile against your provider invoice before reporting them.</p>';
 
   box.innerHTML = html;
 }
