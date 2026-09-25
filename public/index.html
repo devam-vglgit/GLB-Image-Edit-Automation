@@ -579,7 +579,7 @@ footer span { color: var(--gold); }
     <div class="modal-body">
       <div class="usage-section-title">Add a user</div>
       <div class="um-add">
-        <input type="text" id="um-new-username" placeholder="Username" autocomplete="off">
+        <input type="email" id="um-new-username" placeholder="name@vaibhavglobal.com" autocomplete="off">
         <input type="password" id="um-new-password" placeholder="Password (min 6 chars)" autocomplete="new-password">
         <select id="um-new-role">
           <option value="user">User</option>
@@ -1126,16 +1126,16 @@ async function loadUserList() {
     const { users } = await resp.json();
     box.innerHTML = users.map(u => {
       const created = u.createdAt ? new Date(u.createdAt).toLocaleDateString() : '';
-      const isSelf = u.username === ME.user;
+      const isSelf = u.email === ME.user;
       return '<div class="um-row">'
-        + '<span class="um-name">' + escapeHtml(u.username) + '</span>'
+        + '<span class="um-name">' + escapeHtml(u.email) + '</span>'
         + '<span class="um-badge ' + (u.role === 'admin' ? '' : 'user') + '">' + escapeHtml(u.role) + '</span>'
         + (isSelf ? '<span class="um-badge user">you</span>' : '')
         + '<span class="um-meta">' + (created ? 'added ' + escapeHtml(created) : '') + '</span>'
         + '<span class="um-actions">'
-        + '<button onclick="resetUserPassword(\'' + escapeAttr(u.username) + '\')">Reset password</button>'
-        + '<button onclick="toggleUserRole(\'' + escapeAttr(u.username) + '\',\'' + (u.role === 'admin' ? 'user' : 'admin') + '\')">Make ' + (u.role === 'admin' ? 'user' : 'admin') + '</button>'
-        + (isSelf ? '' : '<button class="danger" onclick="deleteUser(\'' + escapeAttr(u.username) + '\')">Remove</button>')
+        + '<button onclick="resetUserPassword(\'' + escapeAttr(u.email) + '\')">Reset password</button>'
+        + '<button onclick="toggleUserRole(\'' + escapeAttr(u.email) + '\',\'' + (u.role === 'admin' ? 'user' : 'admin') + '\')">Make ' + (u.role === 'admin' ? 'user' : 'admin') + '</button>'
+        + (isSelf ? '' : '<button class="danger" onclick="deleteUser(\'' + escapeAttr(u.email) + '\')">Remove</button>')
         + '</span></div>';
     }).join('');
   } catch (e) {
@@ -1156,11 +1156,11 @@ async function umPost(url, body, method) {
 
 async function createUser() {
   umError('');
-  const username = document.getElementById('um-new-username').value.trim();
+  const email = document.getElementById('um-new-username').value.trim();
   const password = document.getElementById('um-new-password').value;
   const role = document.getElementById('um-new-role').value;
   try {
-    await umPost('/api/users', { username, password, role });
+    await umPost('/api/users', { email, password, role });
     document.getElementById('um-new-username').value = '';
     document.getElementById('um-new-password').value = '';
     loadUserList();

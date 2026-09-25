@@ -339,16 +339,18 @@ app.get('/api/turnstile-config', (req, res) => {
   res.json({ enabled: Boolean(TURNSTILE_SECRET_KEY), siteKey: TURNSTILE_SITE_KEY });
 });
 app.post('/api/login', async (req, res) => {
-  const { username, password, cfTurnstileToken } = req.body || {};
+  // `username` is still accepted as a field name so an older cached copy of
+  // the login page keeps working; the value itself is now an email address.
+  const { email, username, password, cfTurnstileToken } = req.body || {};
   const humanVerified = await verifyTurnstile(cfTurnstileToken, req.ip);
   if (!humanVerified) return res.status(401).json({ error: 'Bot check failed. Please retry the challenge.' });
-  const account = userStore.authenticate(username, password);
+  const account = userStore.authenticate(email || username, password);
   if (account) {
-    const token = signSession({ user: account.username, exp: Date.now() + SESSION_MAX_AGE_MS });
+    const token = signSession({ user: account.email, exp: Date.now() + SESSION_MAX_AGE_MS });
     res.setHeader('Set-Cookie', sessionCookie(req, token, Math.floor(SESSION_MAX_AGE_MS / 1000)));
-    return res.json({ ok: true, user: account.username, role: account.role });
+    return res.json({ ok: true, user: account.email, role: account.role });
   }
-  res.status(401).json({ error: 'Invalid username or password.' });
+  res.status(401).json({ error: 'Invalid email or password.' });
 });
 app.post('/api/logout', (req, res) => {
   res.setHeader('Set-Cookie', sessionCookie(req, '', 0));
@@ -422,45 +424,56 @@ app.get('/api/users', requireAdmin, (req, res) => {
   res.json({ users: userStore.list() });
 });
 
-app.post('/api/users', requireAdmin, (req, res) => {
+app.post('/api/users', requireAdmin, async (req, res) => {
   try {
-    const { username, password, role } = req.body || {};
-    res.json({ ok: true, user: userStore.create({ username, password, role }) });
+    const { email, password, role } = req.body || {};
+    res.json({ ok: true, user: await userStore.create({ email, password, role }) });
   } catch (e) {
     // These messages are deliberate, user-facing validation text (e.g.
-    // "That username already exists") — safe to show, unlike a raw fs error.
-    res.status(400).json({ error: e.message });
+    // "That email already exists") — safe to show, unlike a raw driver error.
+    res.status(400).json({ error: friendlyUserError(e) });
   }
 });
 
-app.delete('/api/users/:username', requireAdmin, (req, res) => {
+app.delete('/api/users/:email', requireAdmin, async (req, res) => {
   try {
-    if (req.params.username === req.user) {
+    if (req.params.email.toLowerCase() === String(req.user).toLowerCase()) {
       return res.status(400).json({ error: 'You cannot delete your own account while signed in.' });
     }
-    userStore.remove(req.params.username);
+    await userStore.remove(req.params.email);
     res.json({ ok: true });
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ error: friendlyUserError(e) });
   }
 });
 
-app.post('/api/users/:username/password', requireAdmin, (req, res) => {
+app.post('/api/users/:email/password', requireAdmin, async (req, res) => {
   try {
-    userStore.setPassword(req.params.username, (req.body || {}).password);
+    await userStore.setPassword(req.params.email, (req.body || {}).password);
     res.json({ ok: true });
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ error: friendlyUserError(e) });
   }
 });
 
-app.post('/api/users/:username/role', requireAdmin, (req, res) => {
+app.post('/api/users/:email/role', requireAdmin, async (req, res) => {
   try {
-    res.json({ ok: true, user: userStore.setRole(req.params.username, (req.body || {}).role) });
+    res.json({ ok: true, user: await userStore.setRole(req.params.email, (req.body || {}).role) });
   } catch (e) {
-    res.status(400).json({ error: e.message });
+    res.status(400).json({ error: friendlyUserError(e) });
   }
 });
+
+// Validation messages from users.js are written for humans and safe to show.
+// Anything coming back from the SQL driver is not — it can carry server,
+// database and schema details, so it gets logged and replaced.
+function friendlyUserError(e) {
+  const msg = String(e && e.message || '');
+  const isOurs = /required|valid email|at least 6|already exists|No such user|only admin|Role must be/i.test(msg);
+  if (isOurs) return msg;
+  console.error('[users]', e);
+  return 'Could not complete that change. Check the server log for details.';
+}
 
 // Generation counts, filtered by date range, whole engine, and/or model.
 //   ?from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -666,8 +679,25 @@ app.use((err, req, res, next) => {
   res.status(err.status || 400).json({ error: 'Request could not be processed.' });
 });
 
-app.listen(PORT, () => {
-  console.log(`AI-VGL-Studio running on http://localhost:${PORT}`);
-  console.log(`  Gemini: ${GEMINI_KEY ? 'configured' : 'MISSING key'} (${GEMINI_MODEL})`);
-  console.log(`  OpenAI: ${OPENAI_KEY ? 'configured' : 'MISSING key'} (${OPENAI_MODEL})`);
-});
+// Connect to SQL Server and load the accounts before accepting any traffic.
+// Every page is behind a login, so without the user store there is nothing
+// useful to serve — failing loudly here beats users hitting mystery login
+// errors later.
+(async function start() {
+  try {
+    await userStore.init();
+  } catch (e) {
+    console.error('\n[startup] Could not reach the user database — refusing to start.');
+    console.error('          ' + e.message);
+    console.error('          Check DB_HOST/DB_NAME/DB_USER/DB_PASSWORD in .env, and that');
+    console.error('          this machine can reach the SQL Server on port ' + (process.env.DB_PORT || 1433) + '.\n');
+    process.exit(1);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`AI-VGL-Studio running on http://localhost:${PORT}`);
+    console.log(`  Gemini: ${GEMINI_KEY ? 'configured' : 'MISSING key'} (${GEMINI_MODEL})`);
+    console.log(`  OpenAI: ${OPENAI_KEY ? 'configured' : 'MISSING key'} (${OPENAI_MODEL})`);
+    console.log(`  Users:  SQL Server ${process.env.DB_HOST}/${process.env.DB_NAME}`);
+  });
+})();

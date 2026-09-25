@@ -1,27 +1,23 @@
 // ─────────────────────────────────────────────────────────────
-// User store
+// User store (SQL Server)
 //
-// Users live in data/users.json so an admin can add/remove people from the
-// UI without editing .env and restarting. Passwords are salted + hashed
-// with scrypt (built into Node — no extra dependency); the plaintext is
-// never stored and never leaves the login request.
+// Accounts live in dbo.visualoom_users on AIDB. Login is by EMAIL; the
+// password is never stored — only a random salt and a scrypt hash of it.
 //
-// On first run the file is seeded from the existing AUTH_USERS env var so
-// nobody is locked out by the upgrade. The first seeded account (or one
-// literally named "admin") becomes the admin.
+// The table is read into memory once at startup and refreshed after every
+// change, so per-request role checks cost nothing. The database stays the
+// source of truth; memory is only a read cache. (A second app server
+// writing to the table wouldn't be seen until this one restarts — fine for
+// a single instance, worth revisiting if the app is ever scaled out.)
 //
-// Shape:
-//   { "users": [ { username, salt, hash, role, createdAt } ] }
+// On first run the table is seeded from AUTH_SEED in .env so the existing
+// team isn't locked out by the move off the JSON file.
 // ─────────────────────────────────────────────────────────────
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
-
-const DATA_DIR = path.join(__dirname, 'data');
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const db = require('./db');
 
 const ROLES = ['admin', 'user'];
-let store = null;
+let cache = [];   // [{ email, salt, hash, role, createdAt }]
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash: crypto.scryptSync(String(password), salt, 64).toString('hex') };
@@ -35,124 +31,138 @@ function passwordMatches(password, salt, hash) {
   return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
 }
 
-// Seed from AUTH_USERS="alice:pass1,bob:pass2" so the upgrade doesn't lock
-// anyone out. Falls back to admin/studioe69, matching the previous default.
-function seedFromEnv() {
-  const raw = process.env.AUTH_USERS || '';
-  const pairs = raw.split(',').map(s => s.trim()).filter(Boolean)
-    .map(p => { const i = p.indexOf(':'); return i > -1 ? [p.slice(0, i), p.slice(i + 1)] : null; })
+function normaliseEmail(v) { return String(v || '').trim().toLowerCase(); }
+function looksLikeEmail(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v); }
+
+async function refresh() {
+  const r = await db.request().query(
+    `SELECT email, salt, hash, role, created_at FROM dbo.${db.USERS_TABLE} ORDER BY created_at`
+  );
+  cache = r.recordset.map(row => ({
+    email: row.email,
+    salt: row.salt,
+    hash: row.hash,
+    role: row.role,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null
+  }));
+  return cache;
+}
+
+// AUTH_SEED="email:password:role,email:password:role" — used once, only when
+// the table is empty, so existing logins survive the move to the database.
+function parseSeed() {
+  return (process.env.AUTH_SEED || '').split(',')
+    .map(s => s.trim()).filter(Boolean)
+    .map(entry => {
+      const parts = entry.split(':');
+      if (parts.length < 2) return null;
+      const email = normaliseEmail(parts[0]);
+      const password = parts[1];
+      const role = ROLES.includes(parts[2]) ? parts[2] : 'user';
+      return (email && password) ? { email, password, role } : null;
+    })
     .filter(Boolean);
-  if (!pairs.length) {
-    pairs.push([process.env.AUTH_USERNAME || 'admin', process.env.AUTH_PASSWORD || 'studioe69']);
+}
+
+async function init() {
+  await db.connect();
+  await db.ensureSchema();
+  await refresh();
+
+  if (cache.length === 0) {
+    const seed = parseSeed();
+    if (!seed.length) {
+      console.warn('[users] table is empty and AUTH_SEED is not set — nobody can sign in. Add AUTH_SEED to .env and restart.');
+    }
+    for (const s of seed) {
+      const { salt, hash } = hashPassword(s.password);
+      await db.request()
+        .input('email', db.sql.NVarChar(255), s.email)
+        .input('salt', db.sql.NVarChar(64), salt)
+        .input('hash', db.sql.NVarChar(256), hash)
+        .input('role', db.sql.NVarChar(20), s.role)
+        .query(`INSERT INTO dbo.${db.USERS_TABLE} (email, salt, hash, role) VALUES (@email, @salt, @hash, @role)`);
+    }
+    if (seed.length) {
+      await refresh();
+      console.log(`[users] seeded ${seed.length} account(s) from AUTH_SEED into dbo.${db.USERS_TABLE}`);
+    }
   }
-  const users = pairs.map(([username, password], i) => {
-    const { salt, hash } = hashPassword(password);
-    return {
-      username,
-      salt,
-      hash,
-      // Someone has to be able to manage users, so the account named "admin"
-      // (or the first one listed) gets the admin role.
-      role: (username === 'admin' || i === 0) ? 'admin' : 'user',
-      createdAt: new Date().toISOString()
-    };
-  });
-  // Guarantee at least one admin even if the naming above didn't pick one.
-  if (!users.some(u => u.role === 'admin') && users.length) users[0].role = 'admin';
-  return { users };
+  console.log(`[users] ${cache.length} account(s) loaded from dbo.${db.USERS_TABLE}`);
 }
 
-function load() {
-  if (store) return store;
-  try {
-    store = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-    if (!Array.isArray(store.users)) store = { users: [] };
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.warn('[users] could not read store, re-seeding:', e.message);
-    store = seedFromEnv();
-    save();
-    console.log(`[users] seeded ${store.users.length} account(s) from AUTH_USERS into data/users.json`);
-  }
-  return store;
+function find(email) {
+  const e = normaliseEmail(email);
+  return cache.find(u => u.email === e) || null;
 }
 
-function save() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(USERS_FILE, JSON.stringify(store, null, 2), 'utf8');
-}
-
-function find(username) {
-  return load().users.find(u => u.username === username) || null;
-}
-
-// Returns the user record on success, null otherwise.
-function authenticate(username, password) {
-  const u = find(username);
+// Returns the account on success, null otherwise.
+function authenticate(email, password) {
+  const u = find(email);
   if (!u) return null;
   return passwordMatches(password, u.salt, u.hash) ? u : null;
 }
 
-// Never expose salt/hash to the client.
-function publicView(u) {
-  return { username: u.username, role: u.role, createdAt: u.createdAt || null };
-}
+// Salt and hash never leave the server.
+function publicView(u) { return { email: u.email, role: u.role, createdAt: u.createdAt }; }
+function list() { return cache.map(publicView); }
+function isAdmin(email) { const u = find(email); return !!u && u.role === 'admin'; }
+function adminCount() { return cache.filter(u => u.role === 'admin').length; }
 
-function list() {
-  return load().users.map(publicView);
-}
-
-function isAdmin(username) {
-  const u = find(username);
-  return !!u && u.role === 'admin';
-}
-
-function create({ username, password, role }) {
-  const name = String(username || '').trim();
-  if (!name) throw new Error('Username is required.');
-  if (!/^[a-zA-Z0-9._-]{2,32}$/.test(name)) throw new Error('Username must be 2-32 characters: letters, numbers, dot, dash or underscore.');
+async function create({ email, password, role }) {
+  const e = normaliseEmail(email);
+  if (!e) throw new Error('Email is required.');
+  if (!looksLikeEmail(e)) throw new Error('That does not look like a valid email address.');
   if (String(password || '').length < 6) throw new Error('Password must be at least 6 characters.');
-  if (find(name)) throw new Error('That username already exists.');
+  if (find(e)) throw new Error('That email already exists.');
   const r = ROLES.includes(role) ? role : 'user';
   const { salt, hash } = hashPassword(password);
-  load().users.push({ username: name, salt, hash, role: r, createdAt: new Date().toISOString() });
-  save();
-  return publicView(find(name));
+  await db.request()
+    .input('email', db.sql.NVarChar(255), e)
+    .input('salt', db.sql.NVarChar(64), salt)
+    .input('hash', db.sql.NVarChar(256), hash)
+    .input('role', db.sql.NVarChar(20), r)
+    .query(`INSERT INTO dbo.${db.USERS_TABLE} (email, salt, hash, role) VALUES (@email, @salt, @hash, @role)`);
+  await refresh();
+  return publicView(find(e));
 }
 
-function remove(username) {
-  const s = load();
-  const u = find(username);
+async function remove(email) {
+  const u = find(email);
   if (!u) throw new Error('No such user.');
-  // Never allow the last admin to be deleted — that would lock everyone out
-  // of user management with no way back in short of editing files on the server.
-  if (u.role === 'admin' && s.users.filter(x => x.role === 'admin').length === 1) {
-    throw new Error('Cannot remove the only admin.');
-  }
-  s.users = s.users.filter(x => x.username !== username);
-  store = s;
-  save();
+  // Losing the last admin would lock everyone out of user management with no
+  // way back short of editing the database by hand.
+  if (u.role === 'admin' && adminCount() === 1) throw new Error('Cannot remove the only admin.');
+  await db.request()
+    .input('email', db.sql.NVarChar(255), u.email)
+    .query(`DELETE FROM dbo.${db.USERS_TABLE} WHERE email = @email`);
+  await refresh();
 }
 
-function setPassword(username, password) {
-  const u = find(username);
+async function setPassword(email, password) {
+  const u = find(email);
   if (!u) throw new Error('No such user.');
   if (String(password || '').length < 6) throw new Error('Password must be at least 6 characters.');
   const { salt, hash } = hashPassword(password);
-  u.salt = salt; u.hash = hash;
-  save();
+  await db.request()
+    .input('email', db.sql.NVarChar(255), u.email)
+    .input('salt', db.sql.NVarChar(64), salt)
+    .input('hash', db.sql.NVarChar(256), hash)
+    .query(`UPDATE dbo.${db.USERS_TABLE} SET salt = @salt, hash = @hash WHERE email = @email`);
+  await refresh();
 }
 
-function setRole(username, role) {
-  const s = load();
-  const u = find(username);
+async function setRole(email, role) {
+  const u = find(email);
   if (!u) throw new Error('No such user.');
   if (!ROLES.includes(role)) throw new Error('Role must be "admin" or "user".');
-  if (u.role === 'admin' && role !== 'admin' && s.users.filter(x => x.role === 'admin').length === 1) {
-    throw new Error('Cannot demote the only admin.');
-  }
-  u.role = role;
-  save();
-  return publicView(u);
+  if (u.role === 'admin' && role !== 'admin' && adminCount() === 1) throw new Error('Cannot demote the only admin.');
+  await db.request()
+    .input('email', db.sql.NVarChar(255), u.email)
+    .input('role', db.sql.NVarChar(20), role)
+    .query(`UPDATE dbo.${db.USERS_TABLE} SET role = @role WHERE email = @email`);
+  await refresh();
+  return publicView(find(u.email));
 }
 
-module.exports = { authenticate, list, isAdmin, create, remove, setPassword, setRole, find, publicView, ROLES };
+module.exports = { init, authenticate, list, isAdmin, create, remove, setPassword, setRole, find, publicView, ROLES };
