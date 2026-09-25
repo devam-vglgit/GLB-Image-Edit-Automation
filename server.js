@@ -480,6 +480,16 @@ function friendlyUserError(e) {
   return 'Could not complete that change. Check the server log for details.';
 }
 
+// Current accounts plus anyone who appears in the log, de-duplicated. Covers
+// both "registered but hasn't generated yet" and "generated, then deleted".
+function reportableUsers() {
+  const set = new Set();
+  try { userStore.list().forEach(u => set.add(u.email)); }
+  catch (e) { console.warn('[usage] could not list accounts:', e.message); }
+  usageLog.knownUsers().forEach(u => set.add(u));
+  return [...set].sort();
+}
+
 // Generation counts, filtered by date range, whole engine, and/or model.
 //   ?from=YYYY-MM-DD&to=YYYY-MM-DD
 //   &engines=gemini            → every Gemini model
@@ -505,8 +515,12 @@ app.get('/api/usage', (req, res) => {
       engines: csv(engines).filter(e => e === 'gemini' || e === 'openai'),
       users: userFilter
     }), {
-      // The report's user filter is admin-only, so only send the roster to admins.
-      knownUsers: req.isAdmin ? usageLog.knownUsers() : [req.user],
+      // The report's user filter is admin-only, so only send the roster to
+      // admins. It's every registered account UNION everyone who appears in
+      // the log — so people who haven't generated anything yet are still
+      // listed (their count is simply zero), and people who have since been
+      // deleted don't vanish from historical reporting.
+      knownUsers: req.isAdmin ? reportableUsers() : [req.user],
       isAdmin: !!req.isAdmin
     }));
   } catch (e) {

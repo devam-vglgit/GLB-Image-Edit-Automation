@@ -1208,7 +1208,11 @@ function populateUsageUserPicker(names) {
   if (!box || !isAdmin()) return;
   const previously = new Set([...box.querySelectorAll('input:checked')].map(b => b.value));
   box.innerHTML = '';
-  (names || []).forEach(name => {
+  if (!names || !names.length) {
+    box.innerHTML = '<div class="usage-empty" style="padding:10px 0;">No accounts to filter by.</div>';
+    return;
+  }
+  names.forEach(name => {
     const row = document.createElement('label');
     row.className = 'ms-item';
     row.style.paddingLeft = '8px';
