@@ -326,8 +326,30 @@ const OPENAI_FIDELITY_OPTIONS = [
 ];
 const OPENAI_FIDELITY_IDS = OPENAI_FIDELITY_OPTIONS.map(f => f.id);
 
-const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
-const OPENAI_KEY = process.env.OPENAI_API_KEY || '';
+// API keys travel in HTTP headers, which may only contain Latin-1. A key that
+// picked up a smart quote, dash or bullet — easy to do copying from a document
+// or a masked field — otherwise fails deep inside fetch with an opaque
+// "Cannot convert argument to a ByteString" error, nowhere near the cause.
+// Catch it at startup and say plainly which key is wrong.
+function checkKey(name, value) {
+  if (!value) return value;
+  const bad = [...value].find(ch => ch.charCodeAt(0) > 255);
+  if (bad) {
+    const at = [...value].findIndex(ch => ch.charCodeAt(0) > 255);
+    console.error(`\n[config] ${name} contains a character that cannot be sent in an HTTP header:`);
+    console.error(`         "${bad}" (code ${bad.charCodeAt(0)}) at position ${at + 1} of the key.`);
+    console.error('         The key is probably corrupted — re-copy it from the provider as plain text.');
+    console.error(`         Requests using ${name} will fail until this is fixed.\n`);
+  }
+  return value;
+}
+
+const GEMINI_KEY = checkKey('GEMINI_API_KEY', process.env.GEMINI_API_KEY || '');
+const OPENAI_KEY = checkKey('OPENAI_API_KEY', process.env.OPENAI_API_KEY || '');
+
+function keyIsSendable(value) {
+  return !!value && ![...value].some(ch => ch.charCodeAt(0) > 255);
+}
 
 // Base64 jewellery images are large — allow a generous JSON body.
 app.use(express.json({ limit: '25mb' }));
@@ -590,6 +612,7 @@ app.post('/api/generate', async (req, res) => {
 // ── Gemini image generation ──
 async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
   if (!GEMINI_KEY) throw httpErr(503, 'Gemini is not configured on the server (missing GEMINI_API_KEY).');
+  if (!keyIsSendable(GEMINI_KEY)) throw httpErr(503, 'GEMINI_API_KEY on the server contains invalid characters — it looks corrupted. Re-copy it from Google AI Studio as plain text.');
   const modelId = model || GEMINI_MODEL;
   const imageSize = size || GEMINI_IMAGE_SIZE;
   const { b64, mime } = splitDataUrl(imageDataUrl);
@@ -633,6 +656,7 @@ async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
 // ── OpenAI gpt-image-1 edits ──
 async function generateOpenAI(imageDataUrl, prompt, ratio, model, fidelity) {
   if (!OPENAI_KEY) throw httpErr(503, 'OpenAI is not configured on the server (missing OPENAI_API_KEY).');
+  if (!keyIsSendable(OPENAI_KEY)) throw httpErr(503, 'OPENAI_API_KEY on the server contains invalid characters — it looks corrupted. Re-copy it from platform.openai.com as plain text.');
   const openaiModel = model || OPENAI_MODEL;
   const { b64 } = splitDataUrl(imageDataUrl);
   const buf = Buffer.from(b64, 'base64');
