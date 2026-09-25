@@ -344,6 +344,11 @@ app.post('/api/login', async (req, res) => {
   const { email, username, password, cfTurnstileToken } = req.body || {};
   const humanVerified = await verifyTurnstile(cfTurnstileToken, req.ip);
   if (!humanVerified) return res.status(401).json({ error: 'Bot check failed. Please retry the challenge.' });
+  // Don't tell someone their password is wrong when the truth is we can't
+  // reach the user directory — that sends them chasing the wrong problem.
+  if (!userStore.isReady()) {
+    return res.status(503).json({ error: 'Sign-in is temporarily unavailable — the user directory cannot be reached. Please try again shortly.' });
+  }
   const account = userStore.authenticate(email || username, password);
   if (account) {
     const token = signSession({ user: account.email, exp: Date.now() + SESSION_MAX_AGE_MS });
@@ -679,25 +684,42 @@ app.use((err, req, res, next) => {
   res.status(err.status || 400).json({ error: 'Request could not be processed.' });
 });
 
-// Connect to SQL Server and load the accounts before accepting any traffic.
-// Every page is behind a login, so without the user store there is nothing
-// useful to serve — failing loudly here beats users hitting mystery login
-// errors later.
+// Connect to SQL Server and load the accounts, then serve.
+//
+// If the database can't be reached we still start, and keep retrying in the
+// background. Exiting would mean a brief SQL Server restart — or a firewall
+// change — leaves the app down until someone notices and restarts it by
+// hand. Staying up means it heals itself the moment the database returns.
+// Until then logins fail with a clear message rather than a mystery error.
 (async function start() {
   try {
     await userStore.init();
   } catch (e) {
-    console.error('\n[startup] Could not reach the user database — refusing to start.');
+    console.error('\n[startup] Could not reach the user database — starting anyway, logins will fail until it is back.');
     console.error('          ' + e.message);
-    console.error('          Check DB_HOST/DB_NAME/DB_USER/DB_PASSWORD in .env, and that');
-    console.error('          this machine can reach the SQL Server on port ' + (process.env.DB_PORT || 1433) + '.\n');
-    process.exit(1);
+    console.error('          Check DB_HOST/DB_NAME/DB_USER/DB_PASSWORD in .env, and that this');
+    console.error('          machine can reach the SQL Server on port ' + (process.env.DB_PORT || 1433) + '.\n');
+    retryUserStore();
   }
 
   app.listen(PORT, () => {
     console.log(`AI-VGL-Studio running on http://localhost:${PORT}`);
     console.log(`  Gemini: ${GEMINI_KEY ? 'configured' : 'MISSING key'} (${GEMINI_MODEL})`);
     console.log(`  OpenAI: ${OPENAI_KEY ? 'configured' : 'MISSING key'} (${OPENAI_MODEL})`);
-    console.log(`  Users:  SQL Server ${process.env.DB_HOST}/${process.env.DB_NAME}`);
+    console.log(`  Users:  ${userStore.isReady() ? 'SQL Server ' + process.env.DB_HOST + '/' + process.env.DB_NAME : 'UNAVAILABLE — retrying in the background'}`);
   });
 })();
+
+// Keep trying every 30s until the user store comes up.
+function retryUserStore() {
+  const timer = setInterval(async () => {
+    try {
+      await userStore.init();
+      console.log('[users] database reachable again — logins are working.');
+      clearInterval(timer);
+    } catch (e) {
+      console.warn('[users] still cannot reach the database:', e.message);
+    }
+  }, 30000);
+  timer.unref();   // don't hold the process open just for this
+}

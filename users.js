@@ -18,6 +18,11 @@ const db = require('./db');
 
 const ROLES = ['admin', 'user'];
 let cache = [];   // [{ email, salt, hash, role, createdAt }]
+let ready = false;   // false until the table has been read at least once
+
+// The app serves even when the database is down (see server.js), so callers
+// need a way to tell "no accounts exist" from "we haven't loaded them yet".
+function isReady() { return ready; }
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   return { salt, hash: crypto.scryptSync(String(password), salt, 64).toString('hex') };
@@ -88,6 +93,7 @@ async function init() {
       console.log(`[users] seeded ${seed.length} account(s) from AUTH_SEED into dbo.${db.USERS_TABLE}`);
     }
   }
+  ready = true;
   console.log(`[users] ${cache.length} account(s) loaded from dbo.${db.USERS_TABLE}`);
 }
 
@@ -165,4 +171,4 @@ async function setRole(email, role) {
   return publicView(find(u.email));
 }
 
-module.exports = { init, authenticate, list, isAdmin, create, remove, setPassword, setRole, find, publicView, ROLES };
+module.exports = { init, isReady, authenticate, list, isAdmin, create, remove, setPassword, setRole, find, publicView, ROLES };
