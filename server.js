@@ -144,9 +144,21 @@ function requireAdmin(req, res, next) {
 const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || '';
 const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 
+// Cloudflare explains every rejection in an "error-codes" array. Logging it
+// turns "Bot check failed" from a dead end into a specific cause — the common
+// ones being:
+//   invalid-input-secret   → TURNSTILE_SECRET_KEY is wrong
+//   invalid-input-response → the site key and secret belong to DIFFERENT
+//                            widgets, or the token was already used/expired
+//   timeout-or-duplicate   → token expired (~5 min) or submitted twice
+// A hostname the widget doesn't allow usually fails client-side instead, so
+// no token reaches here at all.
 async function verifyTurnstile(token, remoteIp) {
-  if (!TURNSTILE_SECRET_KEY) return true; // not configured yet — allow through
-  if (!token) return false;
+  if (!TURNSTILE_SECRET_KEY) return true; // not configured — allow through
+  if (!token) {
+    console.warn('[turnstile] no token submitted — the widget did not render or was not completed.');
+    return false;
+  }
   try {
     const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
       method: 'POST',
@@ -154,6 +166,9 @@ async function verifyTurnstile(token, remoteIp) {
       body: new URLSearchParams({ secret: TURNSTILE_SECRET_KEY, response: token, remoteip: remoteIp || '' })
     });
     const data = await resp.json();
+    if (!data.success) {
+      console.warn('[turnstile] rejected by Cloudflare:', JSON.stringify(data['error-codes'] || data));
+    }
     return !!data.success;
   } catch (e) {
     console.error('[turnstile] verification request failed:', e.message);
