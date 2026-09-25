@@ -60,7 +60,10 @@ let turnstileEnabled = false;
 
 // Render the Turnstile widget only if the server has real keys configured —
 // until then this silently no-ops and login works exactly as before.
-fetch('/api/turnstile-config').then(r => r.json()).then(cfg => {
+// no-store: if this response is cached, a key change leaves the browser
+// rendering the widget with the OLD site key while the server verifies
+// against the NEW secret — which Cloudflare rejects as invalid-input-response.
+fetch('/api/turnstile-config', { cache: 'no-store' }).then(r => r.json()).then(cfg => {
   turnstileEnabled = cfg.enabled;
   if (!cfg.enabled || !cfg.siteKey) return;
   const render = () => {

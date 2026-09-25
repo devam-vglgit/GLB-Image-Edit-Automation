@@ -373,6 +373,9 @@ app.use(express.json({ limit: '25mb' }));
 // Lets the login page know whether to render the Turnstile widget, and with
 // which site key. Site key is not secret — safe to expose to the browser.
 app.get('/api/turnstile-config', (req, res) => {
+  // Never cache: the site key here must always match the secret the server
+  // is verifying with, and either can change with a config edit + restart.
+  res.set('Cache-Control', 'no-store');
   res.json({ enabled: Boolean(TURNSTILE_SECRET_KEY), siteKey: TURNSTILE_SITE_KEY });
 });
 app.post('/api/login', async (req, res) => {
