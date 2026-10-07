@@ -570,6 +570,18 @@ app.get('/api/usage', (req, res) => {
   }
 });
 
+// Record downloaded images for the report. Called by the browser when a
+// single result or a ZIP is downloaded: { items: [{ engine, model }] }.
+// Only known engines/models are accepted, so the log can't be filled with junk.
+app.post('/api/downloads', (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 1000) : [];
+  const valid = items.filter(it => it && (
+    (it.engine === 'gemini' && GEMINI_MODEL_IDS.includes(it.model)) ||
+    (it.engine === 'openai' && OPENAI_MODEL_IDS.includes(it.model))
+  )).map(it => ({ engine: it.engine, model: it.model }));
+  res.json({ ok: true, recorded: usageLog.recordDownloads(req.user, valid) });
+});
+
 app.post('/api/generate', async (req, res) => {
   try {
     const { engine, image, prompt, ratio, model, imageSize, temperature, fidelity, keepScene } = req.body || {};

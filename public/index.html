@@ -300,6 +300,15 @@ header {
 .ref-preview { position: relative; display: none; }
 .ref-preview.visible { display: block; }
 .ref-preview img { width: 100%; max-height: 260px; object-fit: contain; border-radius: var(--radius-lg); display: block; background: var(--surface-warm); cursor: zoom-in; }
+/* ── Excel prompts ── */
+.xl-info { display: flex; flex-direction: column; gap: 10px; padding: 14px; border: 1.5px solid var(--border); border-radius: var(--radius-lg); background: var(--cream); }
+.xl-file { font-size: 13px; font-weight: 500; color: var(--ink); word-break: break-all; }
+.xl-col { font-size: 12px; color: var(--ink-muted); display: flex; align-items: center; gap: 10px; }
+.xl-col select { flex: 1; padding: 6px 8px; border: 1.5px solid var(--border-strong); border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 13px; background: #fff; color: var(--ink); }
+.xl-count { font-size: 12px; color: var(--gold-dark); font-weight: 500; }
+.xl-preview { font-size: 11px; color: var(--ink-faint); line-height: 1.5; padding-left: 18px; max-height: 140px; overflow-y: auto; }
+.xl-preview li { margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rr-prompt { display: block; font-size: 11px; color: var(--ink-faint); margin-top: 2px; }
 .ref-preview .ref-name { font-size: 12px; color: var(--ink-muted); margin-top: 8px; word-break: break-all; }
 
 /* ── Batch result rows ── */
@@ -559,6 +568,32 @@ footer span { color: var(--gold); }
           <div class="engine-toggle" id="prompt-mode-toggle" style="align-self:flex-start;">
             <button class="engine-opt active" data-mode="team" onclick="setPromptMode('team')">📋 Team Prompt</button>
             <button class="engine-opt" data-mode="custom" onclick="setPromptMode('custom')">✍ My Own Prompt</button>
+            <button class="engine-opt" data-mode="excel" onclick="setPromptMode('excel')">📊 Excel Prompts</button>
+          </div>
+
+          <!-- Excel mode: one generation per row of the chosen prompt column -->
+          <div id="excel-prompt-wrap" style="display:none">
+            <div class="section-title">
+              <span>Prompts from Excel</span>
+              <button class="manage-link" id="xl-clear-btn" onclick="clearExcel()" style="display:none">✕ Remove file</button>
+            </div>
+            <div class="drop-zone ref-zone" id="xl-dz"
+              onclick="document.getElementById('xl-fi').click()"
+              ondragover="event.preventDefault();this.classList.add('drag-over')"
+              ondragleave="this.classList.remove('drag-over')" ondrop="xlDrop(event)">
+              <span class="drop-icon">📊</span>
+              <h4>Drop an Excel or CSV file</h4>
+              <p>.xlsx or .csv · first row = headers · one image is generated per prompt row</p>
+            </div>
+            <input type="file" id="xl-fi" accept=".xlsx,.csv" style="display:none" onchange="handleExcelInput(event)">
+            <div id="xl-info" class="xl-info" style="display:none">
+              <div class="xl-file" id="xl-file"></div>
+              <label class="xl-col">Prompt column
+                <select id="xl-col" onchange="onExcelColumnChange()"></select>
+              </label>
+              <div class="xl-count" id="xl-count"></div>
+              <ol class="xl-preview" id="xl-preview"></ol>
+            </div>
           </div>
 
           <div id="team-prompt-wrap">
@@ -734,6 +769,8 @@ const S = {
   openaiFidelity: localStorage.getItem('gem_openai_fidelity') ?? '',  // '' = model default
   queue: [],            // [{ id, name, data(dataURL), status, result, note, error }]
   reference: null,      // optional { name, data(dataURL) } — style reference applied to every image
+  excel: null,          // Excel mode: { fileName, headers[], rows[{rowNum, cells[]}], col }
+  run: [],              // items of the current/last run (= queue, or image × Excel-prompt jobs)
   library: { gemini: [], openai: [] },   // per-engine list of strict prompts (from files)
   selectedPromptId: null,
   promptMode: 'team',   // 'team' = use an approved prompt | 'custom' = one-off hand-typed prompt
@@ -1034,12 +1071,14 @@ function renderPromptList() {
 // A custom prompt is never saved — it applies to this run only, so the
 // approved library is left completely untouched.
 function setPromptMode(mode) {
-  S.promptMode = (mode === 'custom') ? 'custom' : 'team';
+  S.promptMode = ['custom', 'excel'].includes(mode) ? mode : 'team';
   document.querySelectorAll('#prompt-mode-toggle .engine-opt').forEach(b => {
     b.classList.toggle('active', b.dataset.mode === S.promptMode);
   });
-  document.getElementById('team-prompt-wrap').style.display = (S.promptMode === 'custom') ? 'none' : '';
+  document.getElementById('team-prompt-wrap').style.display = (S.promptMode === 'team') ? '' : 'none';
+  document.getElementById('excel-prompt-wrap').style.display = (S.promptMode === 'excel') ? '' : 'none';
   updateRingBox();
+  updateGenerateLabel();
 }
 
 // The description box always shows, and what it means depends on the mode:
@@ -1056,6 +1095,12 @@ function updateRingBox() {
     label.textContent = 'Your prompt (this run only)';
     notes.placeholder = 'Type the full prompt to send to the model for this run — e.g. "Place this ring on a white marble surface with soft daylight from the left." No team prompt is used, and nothing here is saved.';
     hint.textContent = 'Sent to the model exactly as written. Not saved to the prompt library — this run only.';
+    return;
+  }
+  if (S.promptMode === 'excel') {
+    label.textContent = 'Extra suggestion for every row (optional)';
+    notes.placeholder = 'Optional — e.g. "keep the metal colour exactly as in the photo". Appended after each Excel prompt.';
+    hint.textContent = 'Each Excel prompt is sent as written; anything here is added after it as guidance.';
     return;
   }
 
@@ -1406,6 +1451,8 @@ function renderUsageReport(data) {
   const byDay = data.byDay || [];
   const byModel = data.byModel || {};
   const byUser = data.byUser || [];
+  const downloads = data.downloads || 0;
+  const dlByModel = data.dlByModel || {};
 
   // Admin-only user filter is rebuilt from whoever appears in the log.
   if (isAdmin() && Array.isArray(data.knownUsers)) populateUsageUserPicker(data.knownUsers);
@@ -1413,43 +1460,49 @@ function renderUsageReport(data) {
   let html = '<div class="usage-summary" style="display:flex;gap:28px;flex-wrap:wrap;">'
     + '<div><div class="usage-total-label">Images generated</div>'
     + '<div class="usage-total">' + fmt(total) + '</div></div>'
+    + '<div><div class="usage-total-label">Images downloaded</div>'
+    + '<div class="usage-total">' + fmt(downloads) + '</div></div>'
     + '<div><div class="usage-total-label">Avg. time / image</div>'
     + '<div class="usage-total">' + duration(data.avgMs) + '</div></div>'
     + '</div>';
 
-  if (!total) {
+  if (!total && !downloads) {
     box.innerHTML = html + '<div class="usage-empty">Nothing recorded for these filters yet.</div>';
     return;
   }
 
   if (byUser.length) {
     html += '<div class="usage-section-title">By user</div><table class="usage-table">'
-      + '<tr><th>User</th><th style="text-align:right;">Images</th><th style="text-align:right;">Avg time</th></tr>';
+      + '<tr><th>User</th><th style="text-align:right;">Images</th><th style="text-align:right;">Downloaded</th><th style="text-align:right;">Avg time</th></tr>';
     byUser.forEach(u => {
       html += '<tr><td>' + escapeHtml(u.user) + '</td>'
         + '<td class="num">' + fmt(u.total) + '</td>'
+        + '<td class="num">' + fmt(u.downloads) + '</td>'
         + '<td class="num">' + duration(u.avgMs) + '</td></tr>';
     });
     html += '</table>';
   }
 
-  const modelRows = Object.entries(byModel).sort((a, b) => b[1] - a[1]);
+  const modelIds = [...new Set([...Object.keys(byModel), ...Object.keys(dlByModel)])]
+    .sort((a, b) => (byModel[b] || 0) - (byModel[a] || 0));
   html += '<div class="usage-section-title">By model</div><table class="usage-table">'
-    + '<tr><th>Model</th><th style="text-align:right;">Images</th></tr>';
-  modelRows.forEach(([id, count]) => {
-    html += '<tr><td>' + escapeHtml(usageModelLabel(id)) + '</td><td class="num">' + fmt(count) + '</td></tr>';
+    + '<tr><th>Model</th><th style="text-align:right;">Images</th><th style="text-align:right;">Downloaded</th></tr>';
+  modelIds.forEach(id => {
+    html += '<tr><td>' + escapeHtml(usageModelLabel(id)) + '</td><td class="num">' + fmt(byModel[id] || 0) + '</td>'
+      + '<td class="num">' + fmt(dlByModel[id] || 0) + '</td></tr>';
   });
   html += '</table>';
 
   html += '<div class="usage-section-title">By day</div><table class="usage-table">'
-    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th></tr>';
+    + '<tr><th>Date</th><th>Models</th><th style="text-align:right;">Images</th><th style="text-align:right;">Downloaded</th></tr>';
   byDay.forEach(d => {
     const detail = Object.entries(d.models)
       .sort((a, b) => b[1] - a[1])
       .map(([id, c]) => escapeHtml(usageModelLabel(id)) + ' ' + fmt(c))
       .join('<br>');
     html += '<tr><td>' + escapeHtml(d.day) + '</td><td style="font-size:12px;">' + detail + '</td>'
-      + '<td class="num">' + fmt(d.total) + '</td></tr>';
+      + '<td class="num">' + fmt(d.total) + '</td>'
+      + '<td class="num">' + fmt(d.downloads || 0) + '</td></tr>';
   });
   html += '</table>';
 
@@ -1543,6 +1596,7 @@ function renderQueue() {
   clearBtn.style.display = (n && !S.busy) ? '' : 'none';
   // Keep the drop zone visible so more can be added; shrink its prompt when items exist.
   dz.querySelector('h4').textContent = n ? 'Add more image(s)' : 'Drop image(s) here';
+  if (S.excel) renderExcel();   // its "per uploaded image" note depends on the queue size
   updateGenerateLabel();
 }
 function statusLabel(s) {
@@ -1558,8 +1612,208 @@ function updateGenerateLabel() {
   const hint = document.getElementById('batch-hint');
   const n = S.queue.length;
   if (S.busy) return;
+  if (S.promptMode === 'excel' && S.excel) {
+    const jobs = n * excelPrompts().length;
+    btn.innerHTML = jobs > 1 ? ('✦ Generate ' + jobs + ' Images') : '✦ Generate Image';
+    hint.textContent = jobs > 1 ? 'One image per Excel prompt, generated one after another.' : '';
+    return;
+  }
   btn.innerHTML = n > 1 ? ('✦ Generate ' + n + ' Images') : '✦ Generate Image';
   hint.textContent = n > 1 ? 'Each image is processed one at a time with the selected prompt.' : '';
+}
+
+// ═══ Excel / CSV prompts ═══
+// Parsed entirely in the browser — no library needed: an .xlsx is a ZIP of
+// XML files, which the built-in DecompressionStream + DOMParser can read.
+// Only the first worksheet is used; row 1 (first non-empty row) is headers.
+function xlDrop(e) {
+  e.preventDefault();
+  document.getElementById('xl-dz').classList.remove('drag-over');
+  loadExcel(e.dataTransfer.files[0]);
+}
+function handleExcelInput(e) { loadExcel(e.target.files[0]); e.target.value = ''; }
+
+async function loadExcel(file) {
+  if (S.busy || !file) return;
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (!['xlsx', 'csv'].includes(ext)) {
+    alert(ext === 'xls'
+      ? 'Old .xls files are not supported — open it in Excel and "Save As" .xlsx (or .csv).'
+      : 'Please choose an .xlsx or .csv file.');
+    return;
+  }
+  try {
+    const rows = ext === 'csv'
+      ? parseCsv(await file.text())
+      : await parseXlsx(await file.arrayBuffer());
+    // Header = first row with any content; data rows keep their sheet row number.
+    const numbered = rows.map((cells, i) => ({ rowNum: i + 1, cells: cells.map(c => String(c ?? '').trim()) }));
+    const headerIdx = numbered.findIndex(r => r.cells.some(Boolean));
+    if (headerIdx < 0) { alert('That file looks empty.'); return; }
+    const headers = numbered[headerIdx].cells;
+    const dataRows = numbered.slice(headerIdx + 1).filter(r => r.cells.some(Boolean));
+    // Prefer a header containing "prompt" (e.g. "Image Prompt"), else the first non-empty column.
+    let col = headers.findIndex(h => /image\s*prompt/i.test(h));
+    if (col < 0) col = headers.findIndex(h => /prompt/i.test(h));
+    if (col < 0) col = headers.findIndex(Boolean);
+    S.excel = { fileName: file.name, headers, rows: dataRows, col: Math.max(col, 0) };
+    renderExcel();
+  } catch (err) {
+    console.error('[excel]', err);
+    alert('Could not read that file: ' + (err.message || err));
+  }
+}
+
+function clearExcel() {
+  if (S.busy) return;
+  S.excel = null;
+  renderExcel();
+}
+function onExcelColumnChange() {
+  if (!S.excel) return;
+  S.excel.col = Number(document.getElementById('xl-col').value) || 0;
+  renderExcel();
+}
+
+// Non-empty prompts from the chosen column, in sheet order.
+function excelPrompts() {
+  if (!S.excel) return [];
+  return S.excel.rows
+    .map(r => ({ rowNum: r.rowNum, text: r.cells[S.excel.col] || '' }))
+    .filter(p => p.text);
+}
+
+function renderExcel() {
+  const has = !!S.excel;
+  document.getElementById('xl-dz').style.display = has ? 'none' : '';
+  document.getElementById('xl-info').style.display = has ? '' : 'none';
+  document.getElementById('xl-clear-btn').style.display = (has && !S.busy) ? '' : 'none';
+  updateGenerateLabel();
+  if (!has) return;
+  document.getElementById('xl-file').textContent = '📄 ' + S.excel.fileName;
+  const sel = document.getElementById('xl-col');
+  sel.innerHTML = S.excel.headers.map((h, i) =>
+    `<option value="${i}" ${i === S.excel.col ? 'selected' : ''}>${escapeHtml(h || ('Column ' + colLetters(i)))}</option>`).join('');
+  const prompts = excelPrompts();
+  const n = prompts.length;
+  document.getElementById('xl-count').textContent = n
+    ? n + ' prompt' + (n > 1 ? 's' : '') + ' found — one image will be generated per prompt' + (S.queue.length > 1 ? ' per uploaded image' : '') + '.'
+    : 'No prompts in this column — pick another column.';
+  document.getElementById('xl-preview').innerHTML = prompts.slice(0, 8)
+    .map(p => `<li title="${escapeAttr(p.text)}">Row ${p.rowNum}: ${escapeHtml(p.text)}</li>`).join('')
+    + (n > 8 ? `<li style="list-style:none">… and ${n - 8} more</li>` : '');
+}
+
+// One job per (uploaded image × Excel prompt). Output name keeps the source
+// file's name with the sheet row appended, so files sort and trace back.
+function buildExcelJobs(prompts) {
+  const jobs = [];
+  S.queue.forEach(src => {
+    const dot = src.name.lastIndexOf('.');
+    const base = dot > 0 ? src.name.slice(0, dot) : src.name;
+    const ext = dot > 0 ? src.name.slice(dot) : '.png';
+    prompts.forEach(p => {
+      jobs.push({ id: uid() + '-' + p.rowNum, name: `${base}_row${p.rowNum}${ext}`, data: src.data,
+                  prompt: p.text, rowNum: p.rowNum, status: 'pending', result: null, note: '', error: '' });
+    });
+  });
+  return jobs;
+}
+
+function colLetters(i) { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; }
+function colIndex(letters) { let n = 0; for (const ch of letters) n = n * 26 + (ch.charCodeAt(0) - 64); return n - 1; }
+
+// RFC 4180-style CSV: quoted fields, "" escapes, newlines inside quotes.
+function parseCsv(text) {
+  text = text.replace(/^﻿/, '');
+  const rows = []; let row = [], field = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Minimal ZIP reader for .xlsx (stored or deflated entries).
+async function readZip(buf) {
+  const dv = new DataView(buf), bytes = new Uint8Array(buf), dec = new TextDecoder();
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('not a valid .xlsx file');
+  const entries = {};
+  let p = dv.getUint32(eocd + 16, true);
+  const count = dv.getUint16(eocd + 10, true);
+  for (let n = 0; n < count && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const method = dv.getUint16(p + 10, true), size = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    const local = dv.getUint32(p + 42, true);
+    // Some zip tools write "\" separators; normalise so lookups by "xl/..." work.
+    entries[dec.decode(bytes.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, '/')] = { method, size, local };
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return async name => {
+    const e = entries[name];
+    if (!e) return null;
+    const start = e.local + 30 + dv.getUint16(e.local + 26, true) + dv.getUint16(e.local + 28, true);
+    const raw = bytes.subarray(start, start + e.size);
+    if (e.method === 0) return dec.decode(raw);
+    if (e.method !== 8) throw new Error('unsupported compression in .xlsx');
+    return await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+  };
+}
+
+async function parseXlsx(buf) {
+  const read = await readZip(buf);
+  const xml = s => new DOMParser().parseFromString(s, 'application/xml');
+  const all = (node, tag) => [...node.getElementsByTagNameNS('*', tag)];
+
+  // Locate the first worksheet via workbook.xml → its relationship target.
+  let sheetPath = 'xl/worksheets/sheet1.xml';
+  const wb = await read('xl/workbook.xml'), rels = await read('xl/_rels/workbook.xml.rels');
+  if (wb && rels) {
+    const first = all(xml(wb), 'sheet')[0];
+    const rid = first && (first.getAttribute('r:id') || first.getAttributeNS('http://schemas.openxmlformats.org/officeDocument/2006/relationships', 'id'));
+    const rel = all(xml(rels), 'Relationship').find(r => r.getAttribute('Id') === rid);
+    if (rel) {
+      const t = rel.getAttribute('Target');
+      sheetPath = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, '');
+    }
+  }
+
+  const ssText = await read('xl/sharedStrings.xml');
+  const shared = ssText ? all(xml(ssText), 'si').map(si => all(si, 't').map(t => t.textContent).join('')) : [];
+
+  const sheetText = await read(sheetPath);
+  if (!sheetText) throw new Error('could not find a worksheet in the file');
+  const rows = [];
+  all(xml(sheetText), 'row').forEach((rowEl, ri) => {
+    const rowNum = Number(rowEl.getAttribute('r')) || (ri + 1);
+    const cells = [];
+    all(rowEl, 'c').forEach((c, ci) => {
+      const ref = c.getAttribute('r');
+      const idx = ref ? colIndex(ref.replace(/[0-9]/g, '')) : ci;
+      const type = c.getAttribute('t');
+      const v = all(c, 'v')[0];
+      let val = '';
+      if (type === 's') val = shared[Number(v && v.textContent)] ?? '';
+      else if (type === 'inlineStr') val = all(c, 't').map(t => t.textContent).join('');
+      else val = v ? v.textContent : '';
+      cells[idx] = val;
+    });
+    rows[rowNum - 1] = Array.from(cells, x => x ?? '');
+  });
+  return Array.from(rows, r => r || []);
 }
 
 // ═══ Build final prompt (STRICT) ═══
@@ -1574,8 +1828,14 @@ function buildFinalPrompt() {
 
   const p = findPrompt(S.selectedPromptId);
   if (!p || !p.text) return null;
-  let text = p.text.trim();
-  const desc = desc0;
+  return applyDescription(p.text);
+}
+
+// Shared by team prompts and Excel rows: fills [YOUR RING DESIGN] with the
+// description box, or appends the description as an extra suggestion.
+function applyDescription(rawText) {
+  let text = String(rawText).trim();
+  const desc = document.getElementById('notes').value.trim();
 
   if (text.includes(RING_TOKEN)) {
     const fill = desc || 'the ring shown in the uploaded reference image';
@@ -1591,13 +1851,23 @@ async function runBatch() {
   if (S.busy) return;
   if (!S.queue.length) { alert('Please upload at least one image.'); return; }
   if (S.engine === 'openai' && !S.openaiModel) { alert('Please select a model first.'); return; }
-  if (S.promptMode === 'team' && !S.selectedPromptId) { alert('Please select a prompt first.'); return; }
-  const prompt = buildFinalPrompt();
-  if (!prompt) {
-    alert(S.promptMode === 'custom'
-      ? 'Please type your prompt in the box above.'
-      : 'The selected prompt is empty. Check its .md file in public/prompts/, or pick another prompt.');
-    return;
+  let prompt = null;
+  if (S.promptMode === 'excel') {
+    const prompts = excelPrompts();
+    if (!prompts.length) { alert('Please upload an Excel/CSV file with at least one prompt in the selected column.'); return; }
+    const jobs = S.queue.length * prompts.length;
+    if (jobs > 1 && !confirm('This will generate ' + jobs + ' image(s) — ' + prompts.length + ' prompt(s) × ' + S.queue.length + ' uploaded image(s). Continue?')) return;
+    S.run = buildExcelJobs(prompts);
+  } else {
+    if (S.promptMode === 'team' && !S.selectedPromptId) { alert('Please select a prompt first.'); return; }
+    prompt = buildFinalPrompt();
+    if (!prompt) {
+      alert(S.promptMode === 'custom'
+        ? 'Please type your prompt in the box above.'
+        : 'The selected prompt is empty. Check its .md file in public/prompts/, or pick another prompt.');
+      return;
+    }
+    S.run = S.queue;
   }
 
   S.busy = true;
@@ -1607,9 +1877,10 @@ async function runBatch() {
   btn.disabled = true;
   document.getElementById('clear-queue-btn').style.display = 'none';
   renderReference();
+  if (S.excel) renderExcel();
 
   // Reset statuses and show the results scaffold.
-  S.queue.forEach(q => { q.status = 'pending'; q.result = null; q.note = ''; q.error = ''; q.usage = null; });
+  S.run.forEach(q => { q.status = 'pending'; q.result = null; q.note = ''; q.error = ''; q.usage = null; });
   renderQueue();
   document.getElementById('results').classList.add('visible');
   document.getElementById('result-engine-badge').textContent = (S.engine === 'gemini' ? 'Gemini' : 'OpenAI') + ' Generated';
@@ -1617,7 +1888,7 @@ async function runBatch() {
   renderResults();
   document.getElementById('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  const total = S.queue.length;
+  const total = S.run.length;
   let done = 0, failed = 0, started = 0;
   const CONCURRENCY = 3;         // images in flight at once — fast, but gentle on rate limits
   const STAGGER_MS = 600;        // small delay before starting each worker, to avoid a burst of N at once
@@ -1627,13 +1898,16 @@ async function runBatch() {
   // rate limit is absorbed automatically rather than failing that image.
   async function worker(workerIndex) {
     if (workerIndex > 0) await new Promise(r => setTimeout(r, STAGGER_MS * workerIndex));  // stagger only the initial burst
-    while (started < S.queue.length) {
-      const q = S.queue[started++];
+    while (started < S.run.length) {
+      const q = S.run[started++];
+      q.status = 'processing';
       setItemStatus(q.id, 'processing');
+      renderResults();
       btn.innerHTML = '<div class="btn-spinner"></div> Generating ' + (done + failed + 1) + ' / ' + total + '…';
       try {
-        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity(), refData);
+        const out = await generateViaBackend(S.engine, q.data, q.prompt ? applyDescription(q.prompt) : prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity(), refData);
         q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done'; done++;
+        q.engine = S.engine; q.model = out.model;   // for download tracking
       } catch (err) {
         q.error = err.message || String(err); q.status = 'error'; failed++;
       }
@@ -1641,7 +1915,7 @@ async function runBatch() {
       renderResults();
     }
   }
-  const workerCount = Math.min(CONCURRENCY, S.queue.length);
+  const workerCount = Math.min(CONCURRENCY, S.run.length);
   await Promise.all(Array.from({ length: workerCount }, (_, idx) => worker(idx)));
 
   S.busy = false;
@@ -1649,17 +1923,19 @@ async function runBatch() {
   updateGenerateLabel();
   renderQueue();
   renderReference();
+  if (S.excel) renderExcel();
   renderTokenTotal();   // drop the "counting…" live label now the run is done
-  if (S.queue.some(q => q.result)) document.getElementById('download-all-btn').style.display = '';
+  if (S.run.some(q => q.result)) document.getElementById('download-all-btn').style.display = '';
   if (failed) showError(failed + ' of ' + total + ' image(s) failed. See the red status on each below.');
 }
 
 // ── Regenerate a single image from the batch (leaves everything else untouched) ──
 async function regenerateOne(id) {
-  const q = S.queue.find(x => x.id === id);
+  const q = S.run.find(x => x.id === id);
   if (!q || q.status === 'processing') return;
   if (S.engine === 'openai' && !S.openaiModel) { alert('Please select a model first.'); return; }
-  const prompt = buildFinalPrompt();
+  // Excel jobs carry their own row prompt; everything else uses the current prompt.
+  const prompt = q.prompt ? applyDescription(q.prompt) : buildFinalPrompt();
   if (!prompt) {
     alert(S.promptMode === 'custom'
       ? 'Please type your prompt in the box above.'
@@ -1673,13 +1949,14 @@ async function regenerateOne(id) {
   try {
     const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity(), S.reference ? S.reference.data : null);
     q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done';
+    q.engine = S.engine; q.model = out.model;   // for download tracking
   } catch (err) {
     q.error = err.message || String(err); q.status = 'error';
   }
   renderQueue();
   renderResults();
   renderTokenTotal();
-  if (S.queue.some(x => x.result)) document.getElementById('download-all-btn').style.display = '';
+  if (S.run.some(x => x.result)) document.getElementById('download-all-btn').style.display = '';
 }
 
 // ── Call our backend, which holds the keys and proxies the provider ──
@@ -1701,15 +1978,15 @@ function fmt(n) { return (n || 0).toLocaleString('en-US'); }
 // Live token tally across the current run (updates as each image finishes).
 function renderTokenTotal() {
   const el = document.getElementById('token-total');
-  const withUsage = S.queue.filter(q => q.usage);
+  const withUsage = S.run.filter(q => q.usage);
   if (!withUsage.length) { el.style.display = 'none'; return; }
   const sum = withUsage.reduce((a, q) => ({
     p: a.p + (q.usage.promptTokens || 0),
     o: a.o + (q.usage.outputTokens || 0),
     t: a.t + (q.usage.totalTokens || 0)
   }), { p: 0, o: 0, t: 0 });
-  const doneCount = S.queue.filter(q => q.status === 'done').length;
-  const total = S.queue.length;
+  const doneCount = S.run.filter(q => q.status === 'done').length;
+  const total = S.run.length;
   const live = S.busy ? `<span class="tt-live">· counting ${doneCount}/${total}…</span>` : '';
   el.style.display = '';
   el.innerHTML = `🔢 Tokens this run: <strong>${fmt(sum.t)}</strong> total &nbsp; · &nbsp; input ${fmt(sum.p)} &nbsp; · &nbsp; output ${fmt(sum.o)} &nbsp; (${withUsage.length} image${withUsage.length > 1 ? 's' : ''}) ${live}`;
@@ -1727,13 +2004,13 @@ function safeName(name, i) {
 function renderResults() {
   const list = document.getElementById('results-list');
   list.innerHTML = '';
-  S.queue.forEach((q, i) => {
+  S.run.forEach((q, i) => {
     const row = document.createElement('div');
     row.className = 'result-row';
     const regenBtn = `<button class="rr-regen" onclick="regenerateOne('${q.id}')" ${q.status === 'processing' ? 'disabled' : ''} title="Regenerate just this image">↺ Regenerate</button>`;
     let genSide;
     if (q.status === 'done' && q.result) {
-      genSide = `<div class="rr-label"><span>AI Generated</span><a class="rr-download" href="${q.result}" download="${safeName(q.name, i)}">⬇ Download</a></div>
+      genSide = `<div class="rr-label"><span>AI Generated</span><a class="rr-download" href="${q.result}" download="${safeName(q.name, i)}" onclick="recordDownloads([S.run[${i}]])">⬇ Download</a></div>
                  <img class="zoomable" src="${q.result}" alt="Generated" onclick="openLightbox(this.src)">`;
     } else if (q.status === 'error') {
       genSide = `<div class="rr-label">AI Generated</div><div class="rr-pending" style="color:#c0392b">⚠ ${escapeHtml(q.error || 'Failed')}</div>`;
@@ -1746,7 +2023,7 @@ function renderResults() {
     row.innerHTML =
       `<div class="rr-side"><div class="rr-label">Original</div><img class="zoomable" src="${q.data}" alt="Original" onclick="openLightbox(this.src)"></div>
        <div class="rr-side gen">${genSide}</div>
-       <div class="rr-name"><span>${escapeHtml(q.name)}${tok}${q.note ? ' · 📝 ' + escapeHtml(q.note) : ''}</span>${(q.status === 'done' || q.status === 'error') ? regenBtn : ''}</div>`;
+       <div class="rr-name"><span>${escapeHtml(q.name)}${tok}${q.note ? ' · 📝 ' + escapeHtml(q.note) : ''}${q.prompt ? `<span class="rr-prompt" title="${escapeAttr(q.prompt)}">Row ${q.rowNum}: ${escapeHtml(q.prompt.length > 160 ? q.prompt.slice(0, 160) + '…' : q.prompt)}</span>` : ''}</span>${(q.status === 'done' || q.status === 'error') ? regenBtn : ''}</div>`;
     list.appendChild(row);
   });
   renderTokenTotal();
@@ -1754,12 +2031,21 @@ function renderResults() {
 
 // ── Download all generated images as a ZIP (no dependencies) ──
 function downloadAll() {
-  const done = S.queue.map((q, i) => ({ q, i })).filter(x => x.q.result);
+  const done = S.run.map((q, i) => ({ q, i })).filter(x => x.q.result);
   if (!done.length) return;
+  recordDownloads(done.map(x => x.q));
   if (done.length === 1) { triggerDownload(done[0].q.result, safeName(done[0].q.name, done[0].i)); return; }
   const files = done.map(({ q, i }) => ({ name: safeName(q.name, i), bytes: dataUrlToBytes(q.result) }));
   const blob = zipStore(files);
   triggerDownload(URL.createObjectURL(blob), 'visualoom-ai-batch.zip');
+}
+// Tell the server which images were downloaded (for the report). Fire-and-
+// forget: a failed log call must never block the actual download.
+function recordDownloads(items) {
+  const payload = (items || []).filter(q => q && q.engine && q.model).map(q => ({ engine: q.engine, model: q.model }));
+  if (!payload.length) return;
+  fetch('/api/downloads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: payload }) })
+    .catch(() => {});
 }
 function triggerDownload(href, name) {
   const a = document.createElement('a');

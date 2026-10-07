@@ -58,6 +58,31 @@ function recordGeneration({ user, engine, model, size, durationMs, usage }) {
   }
 }
 
+// Downloads share the same log, tagged type:'download'. One row per image —
+// a ZIP of 20 is 20 rows — so "downloaded" is directly comparable with
+// "generated". They carry the image's engine/model so model filters apply.
+function recordDownloads(user, items) {
+  const now = new Date();
+  const lines = (items || [])
+    .filter(it => it && it.engine && it.model)
+    .map(it => JSON.stringify({
+      type: 'download',
+      ts: now.toISOString(),
+      day: dayKey(now),
+      user: user || 'unknown',
+      engine: it.engine,
+      model: it.model
+    }) + '\n');
+  if (!lines.length) return 0;
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.appendFileSync(EVENTS_FILE, lines.join(''), 'utf8');
+  } catch (e) {
+    console.error('[usage] could not append download events:', e.message);
+  }
+  return lines.length;
+}
+
 function readEvents() {
   let raw;
   try { raw = fs.readFileSync(EVENTS_FILE, 'utf8'); }
@@ -124,7 +149,11 @@ function query({ from, to, models, engines, users } = {}) {
   const days = {};
   const byModel = {};
   const byUser = {};
-  let total = 0, cost = 0, msTotal = 0, timedCount = 0;
+  const dlByModel = {};
+  let total = 0, cost = 0, msTotal = 0, timedCount = 0, downloads = 0;
+
+  const dayRow = day => days[day] || (days[day] = { day, total: 0, downloads: 0, cost: 0, models: {} });
+  const userRow = user => byUser[user] || (byUser[user] = { user, total: 0, downloads: 0, cost: 0, ms: 0, timed: 0 });
 
   rows.forEach(r => {
     if (from && r.day < from) return;
@@ -133,11 +162,18 @@ function query({ from, to, models, engines, users } = {}) {
     if (wantedUsers && !wantedUsers.has(r.user)) return;
 
     const id = `${r.engine}:${r.model}`;
+    if (r.type === 'download') {
+      downloads += 1;
+      dayRow(r.day).downloads += 1;
+      userRow(r.user).downloads += 1;
+      dlByModel[id] = (dlByModel[id] || 0) + 1;
+      return;
+    }
     total += 1;
     cost += r.cost || 0;
     if (r.ms > 0) { msTotal += r.ms; timedCount += 1; }
 
-    if (!days[r.day]) days[r.day] = { day: r.day, total: 0, cost: 0, models: {} };
+    dayRow(r.day);
     days[r.day].total += 1;
     days[r.day].cost += r.cost || 0;
     days[r.day].models[id] = (days[r.day].models[id] || 0) + 1;
@@ -145,7 +181,7 @@ function query({ from, to, models, engines, users } = {}) {
     if (!byModel[id]) byModel[id] = 0;
     byModel[id] += 1;
 
-    if (!byUser[r.user]) byUser[r.user] = { user: r.user, total: 0, cost: 0, ms: 0, timed: 0 };
+    userRow(r.user);
     byUser[r.user].total += 1;
     byUser[r.user].cost += r.cost || 0;
     if (r.ms > 0) { byUser[r.user].ms += r.ms; byUser[r.user].timed += 1; }
@@ -156,6 +192,7 @@ function query({ from, to, models, engines, users } = {}) {
     .map(u => ({
       user: u.user,
       total: u.total,
+      downloads: u.downloads,
       cost: u.cost,
       avgMs: u.timed ? Math.round(u.ms / u.timed) : 0
     }))
@@ -166,8 +203,10 @@ function query({ from, to, models, engines, users } = {}) {
     cost,
     currency: pricing.currency(),
     avgMs: timedCount ? Math.round(msTotal / timedCount) : 0,
+    downloads,
     byDay,
     byModel,
+    dlByModel,
     byUser: users_
   };
 }
@@ -181,4 +220,4 @@ function knownUsers() {
   return [...set].sort();
 }
 
-module.exports = { recordGeneration, query, dayKey, knownUsers, LEGACY_USER };
+module.exports = { recordGeneration, recordDownloads, query, dayKey, knownUsers, LEGACY_USER };
