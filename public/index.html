@@ -293,6 +293,15 @@ header {
 .q-item .q-status.error { background: rgba(150,40,30,0.85); color: #ffd0c8; }
 .queue-count { font-size: 12px; color: var(--ink-faint); margin-top: 10px; }
 
+/* ── Reference image (optional) ── */
+.ref-card { margin-top: 1.25rem; }
+.ref-card .card-header .opt-tag { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+.drop-zone.ref-zone { min-height: 120px; padding: 1.5rem 1rem; }
+.ref-preview { position: relative; display: none; }
+.ref-preview.visible { display: block; }
+.ref-preview img { width: 100%; max-height: 260px; object-fit: contain; border-radius: var(--radius-lg); display: block; background: var(--surface-warm); cursor: zoom-in; }
+.ref-preview .ref-name { font-size: 12px; color: var(--ink-muted); margin-top: 8px; word-break: break-all; }
+
 /* ── Batch result rows ── */
 .token-total { margin-bottom: 1.25rem; padding: 12px 16px; background: var(--surface-warm); border: 1px solid var(--border); border-radius: var(--radius-lg); font-size: 13px; color: var(--ink-muted); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
 .token-total strong { color: var(--gold-dark); font-weight: 600; }
@@ -511,6 +520,30 @@ footer span { color: var(--gold); }
           <div id="queue-count" class="queue-count"></div>
         </div>
       </div>
+
+      <!-- Optional reference image: guides the look of every output in the batch -->
+      <div class="upload-card ref-card">
+        <div class="card-header">
+          <div class="step-num">＋</div>
+          <h3>Reference Image <span class="opt-tag">· optional</span></h3>
+          <button class="manage-link" id="ref-clear-btn" onclick="clearReference()" style="display:none">✕ Remove</button>
+        </div>
+        <div class="upload-body">
+          <div class="drop-zone ref-zone" id="ref-dz"
+            onclick="document.getElementById('ref-fi').click()"
+            ondragover="event.preventDefault();this.classList.add('drag-over')"
+            ondragleave="this.classList.remove('drag-over')" ondrop="refDrop(event)">
+            <span class="drop-icon">🖼</span>
+            <h4>Drop a reference image</h4>
+            <p>The output will follow its style, lighting, background &amp; composition — your product stays the same.</p>
+          </div>
+          <input type="file" id="ref-fi" accept="image/*" style="display:none" onchange="handleRefInput(event)">
+          <div class="ref-preview" id="ref-preview">
+            <img id="ref-img" alt="Reference image" onclick="openLightbox(this.src)">
+            <div class="ref-name" id="ref-name"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Config -->
@@ -700,6 +733,7 @@ const S = {
   openaiModel: localStorage.getItem('gem_openai_model') || '',  // chosen OpenAI model id
   openaiFidelity: localStorage.getItem('gem_openai_fidelity') ?? '',  // '' = model default
   queue: [],            // [{ id, name, data(dataURL), status, result, note, error }]
+  reference: null,      // optional { name, data(dataURL) } — style reference applied to every image
   library: { gemini: [], openai: [] },   // per-engine list of strict prompts (from files)
   selectedPromptId: null,
   promptMode: 'team',   // 'team' = use an approved prompt | 'custom' = one-off hand-typed prompt
@@ -1449,6 +1483,36 @@ function addFiles(fileList) {
   });
 }
 
+// ═══ Reference image (optional, one per batch) ═══
+const MAX_REF_BYTES = 15 * 1024 * 1024;
+function refDrop(e) {
+  e.preventDefault();
+  document.getElementById('ref-dz').classList.remove('drag-over');
+  setReference(e.dataTransfer.files[0]);
+}
+function handleRefInput(e) { setReference(e.target.files[0]); e.target.value = ''; }
+function setReference(file) {
+  if (S.busy) return;
+  if (!file || !file.type.startsWith('image/')) { alert('Please choose an image file.'); return; }
+  if (file.size > MAX_REF_BYTES) { alert('Reference image is too large (max 15 MB).'); return; }
+  const reader = new FileReader();
+  reader.onload = ev => { S.reference = { name: file.name, data: ev.target.result }; renderReference(); };
+  reader.readAsDataURL(file);
+}
+function clearReference() {
+  if (S.busy) return;
+  S.reference = null;
+  renderReference();
+}
+function renderReference() {
+  const has = !!S.reference;
+  document.getElementById('ref-dz').style.display = has ? 'none' : '';
+  document.getElementById('ref-preview').classList.toggle('visible', has);
+  document.getElementById('ref-clear-btn').style.display = (has && !S.busy) ? '' : 'none';
+  document.getElementById('ref-img').src = has ? S.reference.data : '';
+  document.getElementById('ref-name').textContent = has ? ('Reference: ' + S.reference.name) : '';
+}
+
 function removeQueueItem(id) {
   S.queue = S.queue.filter(q => q.id !== id);
   renderQueue();
@@ -1538,9 +1602,11 @@ async function runBatch() {
 
   S.busy = true;
   clearError();
+  const refData = S.reference ? S.reference.data : null;   // same reference for the whole batch
   const btn = document.getElementById('btn-generate');
   btn.disabled = true;
   document.getElementById('clear-queue-btn').style.display = 'none';
+  renderReference();
 
   // Reset statuses and show the results scaffold.
   S.queue.forEach(q => { q.status = 'pending'; q.result = null; q.note = ''; q.error = ''; q.usage = null; });
@@ -1566,7 +1632,7 @@ async function runBatch() {
       setItemStatus(q.id, 'processing');
       btn.innerHTML = '<div class="btn-spinner"></div> Generating ' + (done + failed + 1) + ' / ' + total + '…';
       try {
-        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity());
+        const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity(), refData);
         q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done'; done++;
       } catch (err) {
         q.error = err.message || String(err); q.status = 'error'; failed++;
@@ -1582,6 +1648,7 @@ async function runBatch() {
   btn.disabled = false;
   updateGenerateLabel();
   renderQueue();
+  renderReference();
   renderTokenTotal();   // drop the "counting…" live label now the run is done
   if (S.queue.some(q => q.result)) document.getElementById('download-all-btn').style.display = '';
   if (failed) showError(failed + ' of ' + total + ' image(s) failed. See the red status on each below.');
@@ -1604,7 +1671,7 @@ async function regenerateOne(id) {
   renderQueue();
   renderResults();
   try {
-    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity());
+    const out = await generateViaBackend(S.engine, q.data, prompt, S.ratio, currentModel(), S.geminiSize, S.geminiTemperature, currentKeepScene(), currentFidelity(), S.reference ? S.reference.data : null);
     q.result = out.image; q.note = out.note || ''; q.usage = out.usage || null; q.status = 'done';
   } catch (err) {
     q.error = err.message || String(err); q.status = 'error';
@@ -1616,11 +1683,11 @@ async function regenerateOne(id) {
 }
 
 // ── Call our backend, which holds the keys and proxies the provider ──
-async function generateViaBackend(engine, imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene, fidelity) {
+async function generateViaBackend(engine, imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene, fidelity, referenceImage) {
   const resp = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ engine, image: imageDataUrl, prompt, ratio, model, imageSize, temperature, keepScene, fidelity })
+    body: JSON.stringify({ engine, image: imageDataUrl, referenceImage: referenceImage || undefined, prompt, ratio, model, imageSize, temperature, keepScene, fidelity })
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || ('Server error ' + resp.status));

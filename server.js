@@ -366,8 +366,9 @@ function keyIsSendable(value) {
   return !!value && ![...value].some(ch => ch.charCodeAt(0) > 255);
 }
 
-// Base64 jewellery images are large — allow a generous JSON body.
-app.use(express.json({ limit: '25mb' }));
+// Base64 jewellery images are large — allow a generous JSON body
+// (a request can carry the source image plus an optional reference image).
+app.use(express.json({ limit: '45mb' }));
 
 // ── Public auth routes (must come before the auth gate below) ──
 // Lets the login page know whether to render the Turnstile widget, and with
@@ -574,6 +575,9 @@ app.post('/api/generate', async (req, res) => {
     const { engine, image, prompt, ratio, model, imageSize, temperature, fidelity, keepScene } = req.body || {};
     if (!image || !prompt) return res.status(400).json({ error: 'image and prompt are required.' });
     if (!engine || !['gemini', 'openai'].includes(engine)) return res.status(400).json({ error: 'engine must be "gemini" or "openai".' });
+    // Optional style/look reference — only accepted if it's an image data URL.
+    const referenceImage = (typeof req.body.referenceImage === 'string' && /^data:image\//.test(req.body.referenceImage))
+      ? req.body.referenceImage : null;
 
     // For Gemini, honour requested model/resolution/temperature only if in the allow-lists; else fall back to env defaults.
     const geminiModel = (model && GEMINI_MODEL_IDS.includes(model)) ? model : GEMINI_MODEL;
@@ -587,8 +591,8 @@ app.post('/api/generate', async (req, res) => {
     // the model took rather than our own post-processing.
     const startedAt = Date.now();
     const out = engine === 'gemini'
-      ? await generateGemini(image, prompt, geminiModel, geminiSize, geminiTemperature)
-      : await generateOpenAI(image, prompt, ratio, openaiModel, openaiFidelity);
+      ? await generateGemini(image, prompt, geminiModel, geminiSize, geminiTemperature, referenceImage)
+      : await generateOpenAI(image, prompt, ratio, openaiModel, openaiFidelity, referenceImage);
     const durationMs = Date.now() - startedAt;
 
     // On-model / worn shots (keepScene) keep their real scene, so the white-background
@@ -627,8 +631,18 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
+// ── Reference image instructions ──
+// When a reference image is supplied, the model receives two images. These
+// notes tell it which is which: the SOURCE is the actual product that must be
+// preserved, the REFERENCE only guides the look of the output.
+const REF_SOURCE_LABEL = 'IMAGE 1 — SOURCE: this is the actual product. Its design, shape, metal, stones and every detail must be preserved exactly.';
+const REF_REFERENCE_LABEL = 'IMAGE 2 — REFERENCE: use this only as a visual guide for the output (style, lighting, background, composition, angle and mood). Do NOT copy the product shown in it.';
+function withReferenceNote(prompt) {
+  return prompt + '\n\nReference image provided: the FIRST image is the source product to keep exactly; the SECOND image is a style reference. Make the output match the reference image\'s look (lighting, background, composition, mood) while keeping the product from the first image unchanged.';
+}
+
 // ── Gemini image generation ──
-async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
+async function generateGemini(imageDataUrl, prompt, model, size, temperature, referenceDataUrl) {
   if (!GEMINI_KEY) throw httpErr(503, 'Gemini is not configured on the server (missing GEMINI_API_KEY).');
   if (!keyIsSendable(GEMINI_KEY)) throw httpErr(503, 'GEMINI_API_KEY on the server contains invalid characters — it looks corrupted. Re-copy it from Google AI Studio as plain text.');
   const modelId = model || GEMINI_MODEL;
@@ -636,12 +650,23 @@ async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
   const { b64, mime } = splitDataUrl(imageDataUrl);
   const generationConfig = { imageConfig: { imageSize } };   // aspect handled by backend square-pad
   if (temperature !== '' && temperature != null) generationConfig.temperature = Number(temperature);
+  let requestParts = [{ inline_data: { mime_type: mime, data: b64 } }, { text: prompt }];
+  if (referenceDataUrl) {
+    const ref = splitDataUrl(referenceDataUrl);
+    requestParts = [
+      { text: REF_SOURCE_LABEL },
+      { inline_data: { mime_type: mime, data: b64 } },
+      { text: REF_REFERENCE_LABEL },
+      { inline_data: { mime_type: ref.mime, data: ref.b64 } },
+      { text: withReferenceNote(prompt) }
+    ];
+  }
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`;
   const resp = await fetchWithRetry(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      contents: [{ parts: [{ inline_data: { mime_type: mime, data: b64 } }, { text: prompt }] }],
+      contents: [{ parts: requestParts }],
       generationConfig
     })
   });
@@ -672,7 +697,7 @@ async function generateGemini(imageDataUrl, prompt, model, size, temperature) {
 }
 
 // ── OpenAI gpt-image-1 edits ──
-async function generateOpenAI(imageDataUrl, prompt, ratio, model, fidelity) {
+async function generateOpenAI(imageDataUrl, prompt, ratio, model, fidelity, referenceDataUrl) {
   if (!OPENAI_KEY) throw httpErr(503, 'OpenAI is not configured on the server (missing OPENAI_API_KEY).');
   if (!keyIsSendable(OPENAI_KEY)) throw httpErr(503, 'OPENAI_API_KEY on the server contains invalid characters — it looks corrupted. Re-copy it from platform.openai.com as plain text.');
   const openaiModel = model || OPENAI_MODEL;
@@ -681,13 +706,23 @@ async function generateOpenAI(imageDataUrl, prompt, ratio, model, fidelity) {
   // Re-encode to a proper RGBA PNG. OpenAI's edit endpoint rejects mismatched
   // formats/modes ("Invalid image file or mode"), e.g. a JPEG sent as .png, so
   // we normalise the input to a valid PNG before uploading.
-  let pngBuf = buf;
-  try { pngBuf = await (await Jimp.read(buf)).getBufferAsync(Jimp.MIME_PNG); }
-  catch (e) { console.warn('[openai] PNG re-encode failed, sending raw:', e.message); }
+  const toPng = async raw => {
+    try { return await (await Jimp.read(raw)).getBufferAsync(Jimp.MIME_PNG); }
+    catch (e) { console.warn('[openai] PNG re-encode failed, sending raw:', e.message); return raw; }
+  };
+  const pngBuf = await toPng(buf);
   const fd = new FormData();
   fd.append('model', openaiModel);
-  fd.append('image', new Blob([pngBuf], { type: 'image/png' }), 'input.png');
-  fd.append('prompt', prompt);
+  if (referenceDataUrl) {
+    // Multiple input images go as image[] — source first, reference second.
+    const refPng = await toPng(Buffer.from(splitDataUrl(referenceDataUrl).b64, 'base64'));
+    fd.append('image[]', new Blob([pngBuf], { type: 'image/png' }), 'source.png');
+    fd.append('image[]', new Blob([refPng], { type: 'image/png' }), 'reference.png');
+    fd.append('prompt', withReferenceNote(prompt));
+  } else {
+    fd.append('image', new Blob([pngBuf], { type: 'image/png' }), 'input.png');
+    fd.append('prompt', prompt);
+  }
   const sizeMap = { '1:1': '1024x1024', '4:5': '1024x1536', '16:9': '1536x1024' };
   if (sizeMap[ratio]) fd.append('size', sizeMap[ratio]);
   // input_fidelity: how faithfully the output preserves the input image's
